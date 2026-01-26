@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- THIS IS A NEW FILE. It is required by the AndroidManifest.xml -->
+<full-backup-content>
+    <!-- This app does not support backup. -->
+</full-backup-content>

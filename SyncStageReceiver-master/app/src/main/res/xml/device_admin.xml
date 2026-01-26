@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device-admin>
+    <uses-policies>
+        <!-- This file declares the policies our device admin can use. -->
+        <!-- For lock task mode (kiosk mode), no specific policies need to be listed here. -->
+    </uses-policies>
+</device-admin>

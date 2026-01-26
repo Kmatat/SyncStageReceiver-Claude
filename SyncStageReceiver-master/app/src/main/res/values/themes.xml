@@ -1,0 +1,16 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      FIX: Changed parent to Theme.MaterialComponents.DayNight.NoActionBar
+      (was Theme.Material.DayNight.NoActionBar, which does not exist)
+    -->
+    <style name="Theme.SyncStageReceiver" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Customize your theme here. -->
+    </style>
+
+    <!-- This style is now correct because its parent is correct -->
+    <style name="Theme.SyncStageReceiver.Fullscreen" parent="Theme.SyncStageReceiver">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+</resources>

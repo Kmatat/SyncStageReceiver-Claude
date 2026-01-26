@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/rootContainer"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000"
+    tools:context=".ui.MainActivity">
+
+    <!-- Video Player View -->
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/player_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:use_controller="false"
+        app:resize_mode="fit"
+        android:visibility="gone" />
+
+    <!-- Idle Image (shown when no video is playing) -->
+    <ImageView
+        android:id="@+id/idle_image_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:src="@drawable/app_banner"
+        android:scaleType="centerCrop"
+        android:visibility="visible" />
+
+    <!-- 
+    ==================== NEW: BLACK OVERLAY FOR PAUSE STATE ====================
+    
+    When the Controller sends a PAUSE command, this overlay is shown
+    to display a black screen instead of the frozen video frame.
+    
+    This provides a cleaner look for passengers during pauses.
+    -->
+    <View
+        android:id="@+id/blackOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/black"
+        android:visibility="gone"
+        android:elevation="10dp" />
+
+    <!-- Permission Error Text (shown if notification permission is denied) -->
+    <TextView
+        android:id="@+id/permission_error_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:text="PERMISSION REQUIRED\n\nApp requires Notification Permission to run. Please grant the permission in App Settings."
+        android:textColor="#FFFF0000"
+        android:textSize="32sp"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:background="#80000000"
+        android:padding="40dp"
+        android:visibility="gone"
+        android:elevation="20dp"
+        tools:visibility="visible" />
+
+</FrameLayout>
