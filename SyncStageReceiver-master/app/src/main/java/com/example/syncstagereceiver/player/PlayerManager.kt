@@ -14,6 +14,7 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.example.syncstagereceiver.services.FeedbackSender
+import com.example.syncstagereceiver.util.LocalPlaybackLogger
 import com.example.syncstagereceiver.util.TimeManager
 import timber.log.Timber
 import java.io.File
@@ -37,12 +38,13 @@ class PlayerManager(
     private val timeManager: TimeManager,
     private val blackOverlay: View? = null  // NEW: Black overlay for pause state
 ) {
-    private var exoPlayer: ExoPlayer = ExoPlayer.Builder(context).build()
+    private var exoPlayer = ExoPlayer.Builder(context).build()
     private val handler = Handler(Looper.getMainLooper())
     private var currentPlaylistSignature: String = ""
     private var currentPlaylist: List<String> = emptyList()
 
     var feedbackSender: FeedbackSender? = null
+    var localLogger: LocalPlaybackLogger? = null
     
     // Device identification for playback reports
     private val deviceId: String by lazy {
@@ -54,11 +56,90 @@ class PlayerManager(
     private val deviceName: String
         get() = sharedPreferences.getString("device_name", deviceId) ?: deviceId
     
-    // Watchdog for detecting stuck playback
+    // Watchdog for detecting stuck playback (aggressive recovery)
     private var lastWatchdogPosition: Long = 0L
     private var watchdogStuckCount: Int = 0
-    private val WATCHDOG_INTERVAL_MS = 5000L
-    private val WATCHDOG_MAX_STUCK_COUNT = 3
+    private val WATCHDOG_INTERVAL_MS = 2000L          // Check every 2 seconds (was 5s)
+    private val WATCHDOG_MAX_STUCK_COUNT = 2           // Trigger after 2 stuck readings = 4s (was 3 = 15s)
+    private var consecutiveRecoveryFailures: Int = 0   // Track failed recoveries for nuclear option
+
+    // Transition watchdog for short clips (10-15 second videos)
+    private var transitionExpectedAt: Long = 0L
+    private val TRANSITION_TIMEOUT_MS = 3000L          // Force next clip if transition takes > 3s
+
+    // Player listener extracted as a field so it can be re-attached on player rebuild
+    private val playerListener = object : Player.Listener {
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            when (playbackState) {
+                Player.STATE_READY -> {
+                    showIdleImage(false)
+                    hideBlackOverlay()
+                    transitionExpectedAt = 0  // Transition completed successfully
+                }
+                Player.STATE_ENDED -> {
+                    // Loop handled by REPEAT_MODE_ALL
+                }
+                Player.STATE_BUFFERING -> {
+                    Timber.d("Player buffering...")
+                }
+                Player.STATE_IDLE -> {
+                    // Player is idle
+                }
+            }
+        }
+
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            val currentMedia = exoPlayer.currentMediaItem
+            val filename = currentMedia?.mediaId ?: "unknown"
+            val status = if (isPlaying) "PLAYING" else "PAUSED"
+            Timber.v("Playback: $status ($filename)")
+
+            // Send standard playback status
+            feedbackSender?.sendPlaybackStatus(status, filename, exoPlayer.currentPosition)
+
+            // Send detailed playback report for Firebase logging
+            if (isPlaying) {
+                sendPlaybackReport(filename, "PLAYING")
+                localLogger?.logVideoStart(filename, exoPlayer.currentMediaItemIndex, exoPlayer.mediaItemCount)
+            }
+        }
+
+        // Report when video changes in playlist + trigger transition watchdog
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            val prevFilename = exoPlayer.currentMediaItem?.mediaId ?: "unknown"
+            if (mediaItem != null) {
+                val filename = mediaItem.mediaId ?: "unknown"
+                Timber.i("Video transition: $filename (reason: $reason)")
+                transitionExpectedAt = 0  // Transition completed
+                localLogger?.logVideoTransition(prevFilename, filename, "reason=$reason")
+                if (exoPlayer.isPlaying) {
+                    sendPlaybackReport(filename, "PLAYING")
+                }
+            }
+            // Set transition watchdog for next expected transition
+            val duration = exoPlayer.duration
+            if (duration > 0) {
+                transitionExpectedAt = System.currentTimeMillis() + duration - exoPlayer.currentPosition
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            Timber.e(error, "ExoPlayer Error - attempting recovery")
+
+            // Report error
+            val filename = exoPlayer.currentMediaItem?.mediaId ?: "unknown"
+            sendPlaybackReport(filename, "ERROR")
+            localLogger?.logPlaybackError(filename, error.message ?: "unknown")
+
+            // Attempt recovery
+            try {
+                exoPlayer.prepare()
+                exoPlayer.playWhenReady = true
+            } catch (e: Exception) {
+                Timber.e(e, "Recovery failed")
+            }
+        }
+    }
 
     init {
         playerView.player = exoPlayer
@@ -68,66 +149,8 @@ class PlayerManager(
         showIdleImage(true)
         hideBlackOverlay()
 
-        exoPlayer.addListener(object : Player.Listener {
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                when (playbackState) {
-                    Player.STATE_READY -> {
-                        showIdleImage(false)
-                        hideBlackOverlay()
-                    }
-                    Player.STATE_ENDED -> {
-                        // Loop handled by REPEAT_MODE_ALL
-                    }
-                    Player.STATE_BUFFERING -> {
-                        Timber.d("Player buffering...")
-                    }
-                    Player.STATE_IDLE -> {
-                        // Player is idle
-                    }
-                }
-            }
+        exoPlayer.addListener(playerListener)
 
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                val currentMedia = exoPlayer.currentMediaItem
-                val filename = currentMedia?.mediaId ?: "unknown"
-                val status = if (isPlaying) "PLAYING" else "PAUSED"
-                Timber.v("Playback: $status ($filename)")
-                
-                // Send standard playback status
-                feedbackSender?.sendPlaybackStatus(status, filename, exoPlayer.currentPosition)
-                
-                // NEW: Send detailed playback report for Firebase logging
-                if (isPlaying) {
-                    sendPlaybackReport(filename, "PLAYING")
-                }
-            }
-            
-            // NEW: Report when video changes in playlist
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                if (exoPlayer.isPlaying && mediaItem != null) {
-                    val filename = mediaItem.mediaId ?: "unknown"
-                    Timber.i("Video transition: $filename (reason: $reason)")
-                    sendPlaybackReport(filename, "PLAYING")
-                }
-            }
-
-            override fun onPlayerError(error: PlaybackException) {
-                Timber.e(error, "ExoPlayer Error - attempting recovery")
-                
-                // Report error
-                val filename = exoPlayer.currentMediaItem?.mediaId ?: "unknown"
-                sendPlaybackReport(filename, "ERROR")
-                
-                // Attempt recovery
-                try {
-                    exoPlayer.prepare()
-                    exoPlayer.playWhenReady = true
-                } catch (e: Exception) {
-                    Timber.e(e, "Recovery failed")
-                }
-            }
-        })
-        
         // Start watchdog timer
         startWatchdog()
     }
@@ -166,49 +189,153 @@ class PlayerManager(
             try {
                 if (exoPlayer.isPlaying) {
                     val currentPos = exoPlayer.currentPosition
-                    
+
                     if (currentPos == lastWatchdogPosition) {
                         watchdogStuckCount++
-                        Timber.w("Watchdog: Position stuck at $currentPos (count: $watchdogStuckCount)")
-                        
+                        Timber.w("Watchdog: Position stuck at $currentPos (count: $watchdogStuckCount/$WATCHDOG_MAX_STUCK_COUNT)")
+
                         if (watchdogStuckCount >= WATCHDOG_MAX_STUCK_COUNT) {
-                            Timber.e("Watchdog: Player stuck for too long! Forcing recovery...")
+                            Timber.e("Watchdog: Player stuck for ${watchdogStuckCount * WATCHDOG_INTERVAL_MS}ms! Forcing recovery...")
+                            val filename = exoPlayer.currentMediaItem?.mediaId ?: "unknown"
+                            localLogger?.logFreezeDetected(filename, currentPos, watchdogStuckCount)
                             forceRecovery()
                             watchdogStuckCount = 0
                         }
                     } else {
                         watchdogStuckCount = 0
+                        consecutiveRecoveryFailures = 0  // Reset on healthy playback
                     }
-                    
+
                     lastWatchdogPosition = currentPos
                 }
+
+                // Transition watchdog: if we're waiting for a transition and it's taking too long
+                checkTransitionTimeout()
+
             } catch (e: Exception) {
                 Timber.e(e, "Watchdog error")
             }
-            
+
             handler.postDelayed(this, WATCHDOG_INTERVAL_MS)
         }
     }
-    
+
+    /**
+     * Check if a video transition is taking too long and force the next clip.
+     */
+    private fun checkTransitionTimeout() {
+        if (transitionExpectedAt > 0 && System.currentTimeMillis() > transitionExpectedAt + TRANSITION_TIMEOUT_MS) {
+            Timber.e("Transition watchdog: Transition timed out after ${TRANSITION_TIMEOUT_MS}ms, forcing next clip")
+            transitionExpectedAt = 0
+            handler.post {
+                try {
+                    val nextIndex = (exoPlayer.currentMediaItemIndex + 1) % exoPlayer.mediaItemCount
+                    exoPlayer.seekTo(nextIndex, 0)
+                    exoPlayer.playWhenReady = true
+                    Timber.i("Transition watchdog: Forced advance to clip index $nextIndex")
+                } catch (e: Exception) {
+                    Timber.e(e, "Transition watchdog: Failed to force next clip")
+                }
+            }
+        }
+    }
+
+    /**
+     * Aggressive recovery: full re-prepare instead of weak seek.
+     * If re-prepare fails twice in a row, nuclear option: release and rebuild player.
+     */
     private fun forceRecovery() {
         handler.post {
             try {
-                val currentPos = exoPlayer.currentPosition
-                val currentIndex = exoPlayer.currentMediaItemIndex
-                
-                // Try seeking forward slightly
-                exoPlayer.seekTo(currentIndex, currentPos + 100)
-                
-                // If still stuck, try re-preparing
-                if (!exoPlayer.isPlaying) {
-                    exoPlayer.prepare()
-                    exoPlayer.playWhenReady = true
+                if (consecutiveRecoveryFailures >= 2) {
+                    // Nuclear option: full player rebuild
+                    Timber.e("Recovery: 2 consecutive failures - rebuilding player from scratch")
+                    localLogger?.logRecoveryAction("NUCLEAR_REBUILD", true, "2 consecutive re-prepare failures")
+                    rebuildPlayer()
+                    consecutiveRecoveryFailures = 0
+                    return@post
                 }
-                
-                Timber.i("Recovery attempted: seeked to ${currentPos + 100}")
+
+                val currentIndex = exoPlayer.currentMediaItemIndex
+                val mediaItemCount = exoPlayer.mediaItemCount
+
+                // Full re-prepare: stop, re-prepare, and resume from same position
+                Timber.i("Recovery: Full re-prepare (attempt ${consecutiveRecoveryFailures + 1})")
+                localLogger?.logRecoveryAction("RE_PREPARE", true, "attempt ${consecutiveRecoveryFailures + 1}")
+                exoPlayer.stop()
+                exoPlayer.prepare()
+                if (mediaItemCount > 0) {
+                    exoPlayer.seekTo(currentIndex, 0)  // Restart current clip from beginning
+                }
+                exoPlayer.playWhenReady = true
+
+                consecutiveRecoveryFailures++
+
+                // Schedule a check to see if recovery worked
+                handler.postDelayed({
+                    if (!exoPlayer.isPlaying) {
+                        Timber.w("Recovery: Player still not playing after re-prepare")
+                    } else {
+                        Timber.i("Recovery: Re-prepare succeeded, playback resumed")
+                        consecutiveRecoveryFailures = 0
+                    }
+                }, 2000)
+
             } catch (e: Exception) {
                 Timber.e(e, "Force recovery failed")
+                consecutiveRecoveryFailures++
             }
+        }
+    }
+
+    /**
+     * Nuclear recovery option: fully release and rebuild the ExoPlayer instance.
+     * Used when re-prepare fails multiple times.
+     */
+    private fun rebuildPlayer() {
+        try {
+            Timber.w("Nuclear recovery: Releasing and rebuilding ExoPlayer")
+            val savedPlaylist = currentPlaylist.toList()
+            val savedSignature = currentPlaylistSignature
+
+            // Release old player
+            handler.removeCallbacks(watchdogRunnable)
+            exoPlayer.release()
+
+            // Build new player
+            exoPlayer = ExoPlayer.Builder(context).build()
+            playerView.player = exoPlayer
+            exoPlayer.volume = 0f
+            exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
+            exoPlayer.playWhenReady = true
+
+            // Re-add listener
+            exoPlayer.addListener(playerListener)
+
+            // Reload playlist if we had one
+            if (savedPlaylist.isNotEmpty()) {
+                currentPlaylistSignature = ""  // Force reload
+                val mediaItems = savedPlaylist.mapNotNull { filename ->
+                    val file = File(context.filesDir, "videos/$filename")
+                    if (file.exists() && file.length() > 1000) {
+                        MediaItem.Builder()
+                            .setUri(file.absolutePath)
+                            .setMediaId(filename)
+                            .build()
+                    } else null
+                }
+                if (mediaItems.isNotEmpty()) {
+                    exoPlayer.setMediaItems(mediaItems)
+                    exoPlayer.prepare()
+                    currentPlaylistSignature = savedSignature
+                    Timber.i("Nuclear recovery: Rebuilt player with ${mediaItems.size} items")
+                }
+            }
+
+            // Restart watchdog
+            startWatchdog()
+        } catch (e: Exception) {
+            Timber.e(e, "Nuclear recovery failed completely")
         }
     }
 

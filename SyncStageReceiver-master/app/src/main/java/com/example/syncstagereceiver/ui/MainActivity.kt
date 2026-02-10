@@ -27,12 +27,14 @@ import com.example.syncstagereceiver.databinding.ActivityMainBinding
 import com.example.syncstagereceiver.kiosk.KioskManager
 import com.example.syncstagereceiver.network.NetworkServiceAdvertiser
 import com.example.syncstagereceiver.network.StreamingServer
+import com.example.syncstagereceiver.network.WifiReconnectManager
 import com.example.syncstagereceiver.playback.PlaybackHandler
 import com.example.syncstagereceiver.player.PlayerManager
 import com.example.syncstagereceiver.services.CommandReceiverService
 import com.example.syncstagereceiver.services.FeedbackSender
 import com.example.syncstagereceiver.sync.SyncHandler
 import com.example.syncstagereceiver.util.FileHandler
+import com.example.syncstagereceiver.util.LocalPlaybackLogger
 import com.example.syncstagereceiver.util.TimeManager
 import com.example.syncstagereceiver.util.VerificationUtils
 import com.google.gson.Gson
@@ -64,15 +66,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var timeManager: TimeManager
     private lateinit var kioskManager: KioskManager
     private lateinit var streamingServer: StreamingServer
-    
+    private lateinit var wifiReconnectManager: WifiReconnectManager
+    private lateinit var localPlaybackLogger: LocalPlaybackLogger
+
     private val handler = Handler(Looper.getMainLooper())
 
     private var commandReceiverService: CommandReceiverService? = null
     private var isBound = false
     private var feedbackSender: FeedbackSender? = null
-    
-    // Auto-recovery settings
-    private val AUTO_RECOVERY_INTERVAL_MS = 30_000L  // Check every 30 seconds
+
+    // Auto-recovery settings (faster: 10s instead of 30s)
+    private val AUTO_RECOVERY_INTERVAL_MS = 10_000L  // Check every 10 seconds
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -119,6 +123,7 @@ class MainActivity : AppCompatActivity() {
         playerManager.feedbackSender = feedbackSender
         playbackHandler.feedbackSender = feedbackSender
         syncHandler.feedbackSender = feedbackSender
+        commandReceiverService?.localLogger = localPlaybackLogger
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -134,6 +139,10 @@ class MainActivity : AppCompatActivity() {
         verificationUtils = VerificationUtils()
         kioskManager = KioskManager(this)
 
+        // Initialize local playback logger
+        localPlaybackLogger = LocalPlaybackLogger(this)
+        localPlaybackLogger.init()
+
         // UPDATED: Initialize PlayerManager with black overlay view
         playerManager = PlayerManager(
             context = this,
@@ -142,6 +151,8 @@ class MainActivity : AppCompatActivity() {
             timeManager = timeManager,
             blackOverlay = binding.blackOverlay  // NEW: Pass black overlay
         )
+
+        playerManager.localLogger = localPlaybackLogger
 
         playbackHandler = PlaybackHandler(playerManager, fileHandler, gson)
         syncHandler = SyncHandler(fileHandler, gson, verificationUtils)
@@ -152,6 +163,10 @@ class MainActivity : AppCompatActivity() {
         // Start P2P Server
         streamingServer = StreamingServer(this)
         streamingServer.start()
+
+        // Start WiFi auto-reconnection manager
+        wifiReconnectManager = WifiReconnectManager(this)
+        wifiReconnectManager.start()
 
         binding.idleImageView.setOnClickListener {
             showRenameDialog()
@@ -291,24 +306,37 @@ class MainActivity : AppCompatActivity() {
             try {
                 val (status, _, _) = playerManager.getCurrentStatus()
                 val isConnected = feedbackSender?.isConnected() ?: false
-                
-                if (status == "IDLE" && !isConnected) {
-                    Timber.w("Auto-recovery: Disconnected and idle, attempting reconnection...")
-                    
-                    // Restart the service
+                val isServerAlive = commandReceiverService?.isServerSocketAlive() ?: false
+
+                if (!isConnected) {
+                    Timber.w("Auto-recovery: Disconnected (status=$status, serverAlive=$isServerAlive)")
+                    localPlaybackLogger.logConnectionEvent("AUTO_RECOVERY_CHECK", "disconnected, status=$status, serverAlive=$isServerAlive")
+
+                    // Re-register NSD so Controller can rediscover us
                     try {
-                        stopService(Intent(this@MainActivity, CommandReceiverService::class.java))
-                        Thread.sleep(1000)
-                        startAndBindService()
-                        Timber.i("Auto-recovery: Service restart initiated")
+                        networkServiceAdvertiser.updateAdvertisement()
+                        Timber.i("Auto-recovery: NSD re-registered")
                     } catch (e: Exception) {
-                        Timber.e(e, "Auto-recovery: Failed to restart service")
+                        Timber.e(e, "Auto-recovery: NSD re-registration failed")
+                    }
+
+                    // If server socket is dead, restart just the service
+                    if (!isServerAlive) {
+                        try {
+                            Timber.w("Auto-recovery: Server socket dead, restarting service...")
+                            localPlaybackLogger.logConnectionEvent("AUTO_RECOVERY_RESTART", "server socket dead")
+                            stopService(Intent(this@MainActivity, CommandReceiverService::class.java))
+                            startAndBindService()
+                            Timber.i("Auto-recovery: Service restart initiated")
+                        } catch (e: Exception) {
+                            Timber.e(e, "Auto-recovery: Failed to restart service")
+                        }
                     }
                 }
             } catch (e: Exception) {
                 Timber.e(e, "Auto-recovery: Error during check")
             }
-            
+
             // Schedule next check
             handler.postDelayed(this, AUTO_RECOVERY_INTERVAL_MS)
         }
@@ -325,5 +353,7 @@ class MainActivity : AppCompatActivity() {
         playerManager.releasePlayer()
         networkServiceAdvertiser.unregisterService()
         streamingServer.stop()
+        wifiReconnectManager.stop()
+        localPlaybackLogger.shutdown()
     }
 }
