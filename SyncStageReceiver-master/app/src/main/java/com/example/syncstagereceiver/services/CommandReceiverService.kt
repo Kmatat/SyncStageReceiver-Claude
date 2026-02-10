@@ -19,6 +19,7 @@ import com.example.syncstagereceiver.network.Feedback
 import com.example.syncstagereceiver.network.MulticastReceiver
 import com.example.syncstagereceiver.network.PlaybackReportFeedback
 import com.example.syncstagereceiver.network.PlaybackStatusFeedback
+import com.example.syncstagereceiver.network.StatusReportFeedback
 import com.example.syncstagereceiver.network.SyncStatusFeedback
 import com.example.syncstagereceiver.ui.MainActivity
 import com.example.syncstagereceiver.util.LocalPlaybackLogger
@@ -47,7 +48,7 @@ interface FeedbackSender {
     fun sendPlaybackStatus(status: String, filename: String, position: Long)
     fun isConnected(): Boolean
     
-    // NEW: Send detailed playback report for Firebase logging
+    // Send detailed playback report for Firebase logging
     fun sendPlaybackReport(
         deviceId: String,
         deviceName: String,
@@ -56,6 +57,17 @@ interface FeedbackSender {
         playlistTotal: Int,
         positionMs: Long,
         status: String
+    )
+
+    // Send full status report in response to REQUEST_STATUS
+    fun sendStatusReport(
+        deviceId: String,
+        deviceName: String,
+        status: String,
+        videoFilename: String,
+        playlistIndex: Int,
+        playlistTotal: Int,
+        positionMs: Long
     )
 }
 
@@ -173,7 +185,6 @@ class CommandReceiverService : Service() {
                             return clientSocket?.isConnected == true && clientSocket?.isClosed == false
                         }
                         
-                        // NEW: Send detailed playback report for Firebase logging
                         override fun sendPlaybackReport(
                             deviceId: String,
                             deviceName: String,
@@ -191,6 +202,27 @@ class CommandReceiverService : Service() {
                                 playlistTotal = playlistTotal,
                                 positionMs = positionMs,
                                 status = status
+                            )
+                            sendFeedback(feedback)
+                        }
+
+                        override fun sendStatusReport(
+                            deviceId: String,
+                            deviceName: String,
+                            status: String,
+                            videoFilename: String,
+                            playlistIndex: Int,
+                            playlistTotal: Int,
+                            positionMs: Long
+                        ) {
+                            val feedback = StatusReportFeedback(
+                                deviceId = deviceId,
+                                deviceName = deviceName,
+                                status = status,
+                                videoFilename = videoFilename,
+                                playlistIndex = playlistIndex,
+                                playlistTotal = playlistTotal,
+                                positionMs = positionMs
                             )
                             sendFeedback(feedback)
                         }

@@ -97,11 +97,11 @@ class PlaybackHandler(
     }
     
     /**
-     * Handle REQUEST_STATUS command - report current playback status
+     * Handle REQUEST_STATUS command - respond with full STATUS_REPORT
+     * including device identification and playlist context for dashboard.
      */
     private fun handleRequestStatus() {
-        val (status, filename, position) = playerManager.getCurrentStatus()
-        Timber.d("Status requested: $status, $filename, $position")
-        feedbackSender?.sendPlaybackStatus(status, filename, position)
+        Timber.d("REQUEST_STATUS received, sending full STATUS_REPORT")
+        playerManager.sendCurrentStatusReport()
     }
 }
