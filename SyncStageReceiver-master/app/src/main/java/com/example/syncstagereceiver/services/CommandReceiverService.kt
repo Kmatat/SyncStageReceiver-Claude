@@ -172,7 +172,17 @@ class CommandReceiverService : Service() {
 
                     val sender = object : FeedbackSender {
                         override fun sendSyncStatus(status: String, playlistId: String?, fileCount: Int) {
-                            val feedback = SyncStatusFeedback(status = status, syncedPlaylistId = playlistId, fileCount = fileCount)
+                            // Get free disk space
+                            val freeSpace = try {
+                                java.io.File(filesDir, "videos").freeSpace
+                            } catch (e: Exception) { 0L }
+                            
+                            val feedback = SyncStatusFeedback(
+                                status = status, 
+                                syncedPlaylistId = playlistId, 
+                                fileCount = fileCount,
+                                diskFreeSpace = freeSpace
+                            )
                             sendFeedback(feedback)
                         }
 
@@ -215,6 +225,11 @@ class CommandReceiverService : Service() {
                             playlistTotal: Int,
                             positionMs: Long
                         ) {
+                            // Get free disk space
+                            val freeSpace = try {
+                                java.io.File(filesDir, "videos").freeSpace
+                            } catch (e: Exception) { 0L }
+                            
                             val feedback = StatusReportFeedback(
                                 deviceId = deviceId,
                                 deviceName = deviceName,
@@ -222,7 +237,8 @@ class CommandReceiverService : Service() {
                                 videoFilename = videoFilename,
                                 playlistIndex = playlistIndex,
                                 playlistTotal = playlistTotal,
-                                positionMs = positionMs
+                                positionMs = positionMs,
+                                diskFreeSpace = freeSpace
                             )
                             sendFeedback(feedback)
                         }

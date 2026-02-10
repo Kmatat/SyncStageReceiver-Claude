@@ -53,20 +53,46 @@ class FileHandler(
 
     fun cleanupOldFiles(filesToKeep: List<String>) {
         val localFiles = localDir.listFiles() ?: return
+        
+        // 1. First pass: Delete files not in the current playlist
         for (file in localFiles) {
             val name = file.name
 
             // Keep .tmp files if they belong to a video in the new playlist
-            // (In case a download was interrupted and we want to resume later)
             val isRelevantTemp = name.endsWith(".tmp") &&
                     filesToKeep.contains(name.removeSuffix(".tmp"))
 
             val isRelevantVideo = filesToKeep.contains(name)
 
             if (!isRelevantVideo && !isRelevantTemp) {
-                Timber.i("Deleting old file: $name")
-                file.delete()
+                Timber.i("Deleting old/unused file: $name")
+                try {
+                    if (file.delete()) {
+                        Timber.d("Deleted: $name")
+                    } else {
+                        Timber.e("Failed to delete: $name")
+                    }
+                } catch (e: Exception) {
+                    Timber.e(e, "Error deleting file: $name")
+                }
             }
+        }
+        
+        // 2. Second pass: Check disk space and emergency cleanup if needed
+        // If free space is < 500MB, we might need to be more aggressive or warn
+        try {
+            val freeSpace = localDir.freeSpace
+            val totalSpace = localDir.totalSpace
+            Timber.i("Disk Status: ${freeSpace / 1024 / 1024}MB free of ${totalSpace / 1024 / 1024}MB")
+            
+            if (freeSpace < 500 * 1024 * 1024) { // Less than 500MB free
+                Timber.w("LOW DISK SPACE WARNING! Free: ${freeSpace / 1024 / 1024}MB")
+                // In a stricter implementation, we could try to delete even 'kept' files if they are not currently playing,
+                // but that risks playback failure. For now, just logging warning is safer 
+                // as we already deleted all non-playlist files.
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Error checking disk space")
         }
     }
 }
