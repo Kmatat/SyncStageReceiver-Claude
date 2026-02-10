@@ -21,6 +21,7 @@ import com.example.syncstagereceiver.network.PlaybackReportFeedback
 import com.example.syncstagereceiver.network.PlaybackStatusFeedback
 import com.example.syncstagereceiver.network.SyncStatusFeedback
 import com.example.syncstagereceiver.ui.MainActivity
+import com.example.syncstagereceiver.util.LocalPlaybackLogger
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import kotlinx.coroutines.*
@@ -83,7 +84,13 @@ class CommandReceiverService : Service() {
 
     private var multicastReceiver: MulticastReceiver? = null
     internal var feedbackSender: FeedbackSender? = null
-    
+    var localLogger: LocalPlaybackLogger? = null
+
+    // Heartbeat tracking for faster dead connection detection
+    @Volatile
+    private var lastMessageReceivedAt: Long = System.currentTimeMillis()
+    private val HEARTBEAT_DEAD_THRESHOLD_MS = 15_000L  // Declare dead after 15s silence
+
     // WakeLock renewal interval (50 minutes, renews before 1-hour timeout)
     private val WAKELOCK_RENEWAL_MS = 50 * 60 * 1000L
 
@@ -95,6 +102,13 @@ class CommandReceiverService : Service() {
 
     fun setFeedbackSender(sender: FeedbackSender?) {
         this.feedbackSender = sender
+    }
+
+    /**
+     * Check if the server socket is still alive and listening for connections.
+     */
+    fun isServerSocketAlive(): Boolean {
+        return serverSocket != null && !serverSocket!!.isClosed
     }
 
     override fun onCreate() {
@@ -136,8 +150,8 @@ class CommandReceiverService : Service() {
                 cleanupClientSocket()
                 clientSocket = socket
 
-                // UPDATED: Increased timeout to 60s for mesh network reliability
-                clientSocket?.soTimeout = 60000
+                // Reduced timeout to 20s for faster dead connection detection
+                clientSocket?.soTimeout = 20000
                 clientSocket?.keepAlive = true
 
                 try {
@@ -182,11 +196,20 @@ class CommandReceiverService : Service() {
                         }
                     }
                     setFeedbackSender(sender)
+                    lastMessageReceivedAt = System.currentTimeMillis()
+                    localLogger?.logConnectionEvent("CLIENT_CONNECTED", socket.inetAddress?.hostAddress ?: "unknown")
 
                     while (serviceScope.isActive) {
                         try {
                             val command = clientInput?.readLine()
-                            if (command == null) break
+                            if (command == null) {
+                                Timber.w("Client disconnected (null read)")
+                                localLogger?.logConnectionEvent("CLIENT_DISCONNECTED", "null read")
+                                break
+                            }
+
+                            // Update heartbeat tracker on every message
+                            lastMessageReceivedAt = System.currentTimeMillis()
 
                             Timber.d("Received TCP command: $command")
                             sendBroadcast(Intent("COMMAND_RECEIVED").apply {
@@ -194,16 +217,28 @@ class CommandReceiverService : Service() {
                             })
 
                         } catch (e: SocketTimeoutException) {
-                            Timber.w("Socket Timeout! Closing connection to force reconnect.")
-                            break
+                            // Check heartbeat: if no message for > threshold, connection is dead
+                            val silenceMs = System.currentTimeMillis() - lastMessageReceivedAt
+                            if (silenceMs > HEARTBEAT_DEAD_THRESHOLD_MS) {
+                                Timber.w("Heartbeat dead: No message for ${silenceMs}ms (threshold: ${HEARTBEAT_DEAD_THRESHOLD_MS}ms). Closing connection.")
+                                localLogger?.logConnectionEvent("HEARTBEAT_DEAD", "silence=${silenceMs}ms")
+                                break
+                            } else {
+                                // Socket timeout but heartbeat still recent — continue waiting
+                                Timber.d("Socket timeout but last message was ${silenceMs}ms ago, continuing...")
+                                continue
+                            }
                         } catch (e: IOException) {
                             Timber.e("Socket read error: ${e.message}")
+                            localLogger?.logConnectionEvent("SOCKET_ERROR", e.message ?: "unknown")
                             break
                         }
                     }
                 } catch (e: Exception) {
                     Timber.e(e, "Error initializing client streams.")
+                    localLogger?.logConnectionEvent("STREAM_INIT_ERROR", e.message ?: "unknown")
                 } finally {
+                    localLogger?.logConnectionEvent("CLIENT_CLEANUP", "cleaning up client socket")
                     cleanupClientSocket()
                     setFeedbackSender(null)
                 }
