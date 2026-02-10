@@ -67,6 +67,9 @@ class PlayerManager(
     private var transitionExpectedAt: Long = 0L
     private val TRANSITION_TIMEOUT_MS = 3000L          // Force next clip if transition takes > 3s
 
+    // Periodic playback reporting for dashboard freshness
+    private val PLAYBACK_REPORT_INTERVAL_MS = 10_000L  // Report every 10 seconds while playing
+
     // Player listener extracted as a field so it can be re-attached on player rebuild
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -153,6 +156,9 @@ class PlayerManager(
 
         // Start watchdog timer
         startWatchdog()
+
+        // Start periodic playback reporting for dashboard
+        startPeriodicReporting()
     }
     
     // ==================== PLAYBACK REPORTING (NEW) ====================
@@ -173,7 +179,49 @@ class PlayerManager(
         )
     }
     
-    // ==================== WATCHDOG TIMER (NEW) ====================
+    /**
+     * Send a full STATUS_REPORT in response to REQUEST_STATUS.
+     * Includes device identification and playlist context for the dashboard.
+     */
+    fun sendCurrentStatusReport() {
+        val filename = exoPlayer.currentMediaItem?.mediaId ?: ""
+        val status = when {
+            exoPlayer.isPlaying -> "PLAYING"
+            blackOverlay?.visibility == View.VISIBLE -> "PAUSED"
+            else -> "IDLE"
+        }
+        feedbackSender?.sendStatusReport(
+            deviceId = deviceId,
+            deviceName = deviceName,
+            status = status,
+            videoFilename = filename,
+            playlistIndex = exoPlayer.currentMediaItemIndex,
+            playlistTotal = exoPlayer.mediaItemCount,
+            positionMs = exoPlayer.currentPosition
+        )
+    }
+
+    // ==================== PERIODIC PLAYBACK REPORTING ====================
+
+    private val playbackReportRunnable = object : Runnable {
+        override fun run() {
+            try {
+                if (exoPlayer.isPlaying) {
+                    val filename = exoPlayer.currentMediaItem?.mediaId ?: "unknown"
+                    sendPlaybackReport(filename, "PLAYING")
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Periodic playback report error")
+            }
+            handler.postDelayed(this, PLAYBACK_REPORT_INTERVAL_MS)
+        }
+    }
+
+    private fun startPeriodicReporting() {
+        handler.postDelayed(playbackReportRunnable, PLAYBACK_REPORT_INTERVAL_MS)
+    }
+
+    // ==================== WATCHDOG TIMER ====================
     
     /**
      * Watchdog timer to detect and recover from stuck playback.
@@ -300,6 +348,7 @@ class PlayerManager(
 
             // Release old player
             handler.removeCallbacks(watchdogRunnable)
+            handler.removeCallbacks(playbackReportRunnable)
             exoPlayer.release()
 
             // Build new player
@@ -332,8 +381,9 @@ class PlayerManager(
                 }
             }
 
-            // Restart watchdog
+            // Restart watchdog and periodic reporting
             startWatchdog()
+            startPeriodicReporting()
         } catch (e: Exception) {
             Timber.e(e, "Nuclear recovery failed completely")
         }
@@ -499,8 +549,9 @@ class PlayerManager(
 
     fun releasePlayer() {
         handler.removeCallbacks(watchdogRunnable)
-        handler.post { 
-            exoPlayer.release() 
+        handler.removeCallbacks(playbackReportRunnable)
+        handler.post {
+            exoPlayer.release()
         }
     }
 

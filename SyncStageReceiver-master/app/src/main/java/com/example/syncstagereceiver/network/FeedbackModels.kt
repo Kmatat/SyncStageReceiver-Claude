@@ -59,3 +59,20 @@ data class PlaybackReportFeedback(
     @SerializedName("status") val status: String,  // "PLAYING", "PAUSED", "ERROR"
     @SerializedName("timestamp") val timestamp: Long = System.currentTimeMillis()
 ) : Feedback("PLAYBACK_REPORT")
+
+/**
+ * Status report feedback - full device status in response to REQUEST_STATUS.
+ * Includes device identification and playlist context so the Controller
+ * can match this report to a specific screen on the dashboard.
+ */
+data class StatusReportFeedback(
+    @SerializedName("action") override val action: String = "STATUS_REPORT",
+    @SerializedName("deviceId") val deviceId: String,
+    @SerializedName("deviceName") val deviceName: String,
+    @SerializedName("status") val status: String,
+    @SerializedName("videoFilename") val videoFilename: String,
+    @SerializedName("playlistIndex") val playlistIndex: Int,
+    @SerializedName("playlistTotal") val playlistTotal: Int,
+    @SerializedName("positionMs") val positionMs: Long,
+    @SerializedName("timestamp") val timestamp: Long = System.currentTimeMillis()
+) : Feedback("STATUS_REPORT")
