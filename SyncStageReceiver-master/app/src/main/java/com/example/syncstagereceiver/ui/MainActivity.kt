@@ -156,6 +156,7 @@ class MainActivity : AppCompatActivity() {
 
         playbackHandler = PlaybackHandler(playerManager, fileHandler, gson)
         syncHandler = SyncHandler(fileHandler, gson, verificationUtils)
+        syncHandler.onSyncCompleted = { playerManager.invalidatePlaylistCache() }
 
         networkServiceAdvertiser = NetworkServiceAdvertiser(this, sharedPreferences, 12345)
         networkServiceAdvertiser.registerService()

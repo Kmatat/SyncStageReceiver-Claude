@@ -417,7 +417,13 @@ class PlayerManager(
                 Timber.d("Sync: Latency=${latency}ms. TargetPos=$targetPositionMs -> AdjPos=$adjustedPosition")
 
                 // 2. Load Playlist (If changed) with memory cleanup
-                val newSignature = filenames.joinToString(",")
+                // Signature includes file size + lastModified so that replacing
+                // files on disk (same name, new content after SYNC_PLAYLIST)
+                // forces ExoPlayer to reload instead of playing stale cached data.
+                val newSignature = filenames.joinToString(",") { filename ->
+                    val f = File(context.filesDir, "videos/$filename")
+                    "$filename:${f.length()}:${f.lastModified()}"
+                }
                 if (newSignature != currentPlaylistSignature) {
                     Timber.i("Loading NEW playlist: $filenames")
 
@@ -509,6 +515,18 @@ class PlayerManager(
             Timber.d("Memory cleanup completed before playlist change")
         } catch (e: Exception) {
             Timber.w(e, "Error during memory cleanup")
+        }
+    }
+
+    /**
+     * Invalidate the cached playlist signature so the next PLAY command
+     * forces ExoPlayer to reload media items from disk.
+     * Call this after SYNC_PLAYLIST completes to ensure updated files are picked up.
+     */
+    fun invalidatePlaylistCache() {
+        handler.post {
+            Timber.i("Playlist cache invalidated (sync completed)")
+            currentPlaylistSignature = ""
         }
     }
 
