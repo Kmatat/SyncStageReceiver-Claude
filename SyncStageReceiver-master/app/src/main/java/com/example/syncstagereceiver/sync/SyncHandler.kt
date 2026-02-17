@@ -30,6 +30,7 @@ class SyncHandler(
     private val verificationUtils: VerificationUtils
 ) {
     var feedbackSender: FeedbackSender? = null
+    var onSyncCompleted: (() -> Unit)? = null
     
     // Retry configuration
     private val MAX_RETRIES = 3
@@ -105,6 +106,9 @@ class SyncHandler(
 
                 feedbackSender?.sendSyncStatus("COMPLETED", playlistId, filesToSync.size)
                 Timber.i("Sync completed successfully for playlist $playlistId")
+
+                // Notify that files changed so the player reloads on next PLAY
+                onSyncCompleted?.invoke()
 
             } catch (e: Exception) {
                 Timber.e(e, "Sync Failed")
