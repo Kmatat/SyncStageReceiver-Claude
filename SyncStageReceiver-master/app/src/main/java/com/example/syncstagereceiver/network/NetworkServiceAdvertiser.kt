@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.os.Handler
+import android.os.Looper
 import timber.log.Timber
 
 class NetworkServiceAdvertiser(
@@ -11,12 +13,18 @@ class NetworkServiceAdvertiser(
     private val sharedPreferences: SharedPreferences,
     private val port: Int
 ) {
-    private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
+    private val nsdManager: NsdManager? = try {
+        context.getSystemService(Context.NSD_SERVICE) as? NsdManager
+    } catch (e: Exception) {
+        Timber.e(e, "Failed to get NsdManager")
+        null
+    }
+    private val handler = Handler(Looper.getMainLooper())
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var serviceName: String? = null
 
     fun registerService() {
-        if (registrationListener != null) return // Already registered
+        if (registrationListener != null || nsdManager == null) return
 
         // 1. Get Device Name (or Default)
         val storedName = sharedPreferences.getString("device_name", null)
@@ -31,7 +39,6 @@ class NetworkServiceAdvertiser(
 
         // 2. Build Service Info
         val serviceInfo = NsdServiceInfo().apply {
-            // "SyncStageReceiver" is the type the Controller looks for
             serviceType = "_syncstage._tcp."
             this.serviceName = finalName
             this.port = this@NetworkServiceAdvertiser.port
@@ -63,26 +70,27 @@ class NetworkServiceAdvertiser(
             nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
         } catch (e: Exception) {
             Timber.e(e, "Failed to register NSD service")
+            registrationListener = null
         }
     }
 
     fun unregisterService() {
-        if (registrationListener != null) {
-            try {
-                nsdManager.unregisterService(registrationListener)
-            } catch (e: Exception) {
-                Timber.e(e, "Error unregistering NSD service")
-            } finally {
-                registrationListener = null
-            }
+        val listener = registrationListener ?: return
+        registrationListener = null
+        try {
+            nsdManager?.unregisterService(listener)
+        } catch (e: Exception) {
+            Timber.e(e, "Error unregistering NSD service")
         }
     }
 
+    /**
+     * Re-register NSD advertisement. Uses a delayed post instead of Thread.sleep()
+     * to avoid blocking the calling thread (which may be the main thread and cause ANR).
+     */
     fun updateAdvertisement() {
-        // NSD doesn't support dynamic updates easily. We must unregister and re-register.
         unregisterService()
-        // Small delay to ensure cleanup
-        Thread.sleep(100)
-        registerService()
+        // Use handler delay instead of Thread.sleep to avoid blocking main thread
+        handler.postDelayed({ registerService() }, 150)
     }
 }
