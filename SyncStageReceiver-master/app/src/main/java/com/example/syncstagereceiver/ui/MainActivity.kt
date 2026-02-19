@@ -346,6 +346,16 @@ class MainActivity : AppCompatActivity() {
     private val autoRecoveryRunnable = object : Runnable {
         override fun run() {
             try {
+                // Proactively refresh feedbackSender from service so PlayerManager
+                // always has the latest reference (fixes reports silently dropping
+                // when a TCP client connects after service bind)
+                val serviceSender = commandReceiverService?.feedbackSender
+                if (serviceSender != null && serviceSender !== feedbackSender) {
+                    Timber.i("Auto-recovery: Updating feedbackSender reference")
+                    feedbackSender = serviceSender
+                    updateHandlersWithFeedbackSender()
+                }
+
                 val (status, _, _) = playerManager.getCurrentStatus()
                 val isConnected = feedbackSender?.isConnected() ?: false
                 val isServerAlive = commandReceiverService?.isServerSocketAlive() ?: false
