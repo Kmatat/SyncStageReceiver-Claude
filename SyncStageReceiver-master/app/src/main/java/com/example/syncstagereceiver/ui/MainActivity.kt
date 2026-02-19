@@ -137,19 +137,18 @@ class MainActivity : AppCompatActivity() {
         timeManager = TimeManager(this)
         fileHandler = FileHandler(this, OkHttpClient())
         verificationUtils = VerificationUtils()
-        kioskManager = KioskManager(this)
 
         // Initialize local playback logger
         localPlaybackLogger = LocalPlaybackLogger(this)
         localPlaybackLogger.init()
 
-        // UPDATED: Initialize PlayerManager with black overlay view
+        // Initialize PlayerManager with black overlay view
         playerManager = PlayerManager(
             context = this,
             playerView = binding.playerView,
             idleImageView = binding.idleImageView,
             timeManager = timeManager,
-            blackOverlay = binding.blackOverlay  // NEW: Pass black overlay
+            blackOverlay = binding.blackOverlay
         )
 
         playerManager.localLogger = localPlaybackLogger
@@ -158,16 +157,40 @@ class MainActivity : AppCompatActivity() {
         syncHandler = SyncHandler(fileHandler, gson, verificationUtils)
         syncHandler.onSyncCompleted = { playerManager.invalidatePlaylistCache() }
 
-        networkServiceAdvertiser = NetworkServiceAdvertiser(this, sharedPreferences, 12345)
-        networkServiceAdvertiser.registerService()
+        // --- Non-critical subsystems: each wrapped individually so one failure ---
+        // --- doesn't crash the entire app startup.                             ---
 
-        // Start P2P Server
-        streamingServer = StreamingServer(this)
-        streamingServer.start()
+        // Kiosk mode (may fail on Xiaomi without device owner permission)
+        try {
+            kioskManager = KioskManager(this)
+            kioskManager.enableKioskMode(this)
+        } catch (e: Exception) {
+            Timber.e(e, "Kiosk mode initialization failed (non-fatal)")
+        }
 
-        // Start WiFi auto-reconnection manager
-        wifiReconnectManager = WifiReconnectManager(this)
-        wifiReconnectManager.start()
+        // NSD service advertisement
+        try {
+            networkServiceAdvertiser = NetworkServiceAdvertiser(this, sharedPreferences, 12345)
+            networkServiceAdvertiser.registerService()
+        } catch (e: Exception) {
+            Timber.e(e, "NSD service registration failed (non-fatal)")
+        }
+
+        // P2P streaming server
+        try {
+            streamingServer = StreamingServer(this)
+            streamingServer.start()
+        } catch (e: Exception) {
+            Timber.e(e, "Streaming server start failed (non-fatal)")
+        }
+
+        // WiFi auto-reconnection manager
+        try {
+            wifiReconnectManager = WifiReconnectManager(this)
+            wifiReconnectManager.start()
+        } catch (e: Exception) {
+            Timber.e(e, "WiFi reconnect manager start failed (non-fatal)")
+        }
 
         binding.idleImageView.setOnClickListener {
             showRenameDialog()
@@ -175,27 +198,33 @@ class MainActivity : AppCompatActivity() {
 
         checkNotificationPermissionAndStartService()
 
-        val filter = IntentFilter("COMMAND_RECEIVED")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(commandReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(commandReceiver, filter)
+        try {
+            val filter = IntentFilter("COMMAND_RECEIVED")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(commandReceiver, filter, RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(commandReceiver, filter)
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to register command receiver (non-fatal)")
         }
-
-        kioskManager.enableKioskMode(this)
 
         // Auto-Resume Logic
         handler.postDelayed({
-            val (status, _, _) = playerManager.getCurrentStatus()
-            if (status != "PLAYING") {
-                Timber.i("No command from Controller yet. Attempting local resume...")
-                playerManager.tryResumeFromSavedState()
-            } else {
-                Timber.i("Controller took control during boot. Local resume skipped.")
+            try {
+                val (status, _, _) = playerManager.getCurrentStatus()
+                if (status != "PLAYING") {
+                    Timber.i("No command from Controller yet. Attempting local resume...")
+                    playerManager.tryResumeFromSavedState()
+                } else {
+                    Timber.i("Controller took control during boot. Local resume skipped.")
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Auto-resume check failed")
             }
         }, 5000)
-        
-        // NEW: Start auto-recovery loop
+
+        // Start auto-recovery loop
         startAutoRecoveryLoop()
     }
 
@@ -213,7 +242,9 @@ class MainActivity : AppCompatActivity() {
                 val newName = input.text.toString().trim()
                 if (newName.isNotEmpty()) {
                     sharedPreferences.edit().putString("device_name", newName).apply()
-                    networkServiceAdvertiser.updateAdvertisement()
+                    if (::networkServiceAdvertiser.isInitialized) {
+                        networkServiceAdvertiser.updateAdvertisement()
+                    }
                     Timber.i("Manually updated device name to: $newName")
                 }
             }
@@ -249,7 +280,15 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.startForegroundService(this, serviceIntent)
             bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
         } catch (e: Exception) {
-            Timber.e(e, "Failed to start service.")
+            Timber.e(e, "Failed to start foreground service, falling back to regular service start")
+            // On Xiaomi/MIUI and Android 12+, foreground service start may be blocked.
+            // Fall back to a regular service start and try binding.
+            try {
+                startService(serviceIntent)
+                bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+            } catch (e2: Exception) {
+                Timber.e(e2, "Service start failed completely. App will run without command service.")
+            }
         }
     }
 
@@ -276,7 +315,9 @@ class MainActivity : AppCompatActivity() {
                     val name = command.get("name")?.asString
                     if (!name.isNullOrEmpty()) {
                         sharedPreferences.edit().putString("device_name", name).apply()
-                        networkServiceAdvertiser.updateAdvertisement()
+                        if (::networkServiceAdvertiser.isInitialized) {
+                            networkServiceAdvertiser.updateAdvertisement()
+                        }
                     }
                 }
                 "SET_MASTER_TIME" -> {
@@ -305,6 +346,16 @@ class MainActivity : AppCompatActivity() {
     private val autoRecoveryRunnable = object : Runnable {
         override fun run() {
             try {
+                // Proactively refresh feedbackSender from service so PlayerManager
+                // always has the latest reference (fixes reports silently dropping
+                // when a TCP client connects after service bind)
+                val serviceSender = commandReceiverService?.feedbackSender
+                if (serviceSender != null && serviceSender !== feedbackSender) {
+                    Timber.i("Auto-recovery: Updating feedbackSender reference")
+                    feedbackSender = serviceSender
+                    updateHandlersWithFeedbackSender()
+                }
+
                 val (status, _, _) = playerManager.getCurrentStatus()
                 val isConnected = feedbackSender?.isConnected() ?: false
                 val isServerAlive = commandReceiverService?.isServerSocketAlive() ?: false
@@ -315,8 +366,10 @@ class MainActivity : AppCompatActivity() {
 
                     // Re-register NSD so Controller can rediscover us
                     try {
-                        networkServiceAdvertiser.updateAdvertisement()
-                        Timber.i("Auto-recovery: NSD re-registered")
+                        if (::networkServiceAdvertiser.isInitialized) {
+                            networkServiceAdvertiser.updateAdvertisement()
+                            Timber.i("Auto-recovery: NSD re-registered")
+                        }
                     } catch (e: Exception) {
                         Timber.e(e, "Auto-recovery: NSD re-registration failed")
                     }
@@ -346,15 +399,15 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacksAndMessages(null)
-        try { unregisterReceiver(commandReceiver) } catch (e: Exception) {}
+        try { unregisterReceiver(commandReceiver) } catch (_: Exception) {}
         if (isBound) {
-            unbindService(serviceConnection)
+            try { unbindService(serviceConnection) } catch (_: Exception) {}
             isBound = false
         }
-        playerManager.releasePlayer()
-        networkServiceAdvertiser.unregisterService()
-        streamingServer.stop()
-        wifiReconnectManager.stop()
-        localPlaybackLogger.shutdown()
+        try { playerManager.releasePlayer() } catch (_: Exception) {}
+        try { if (::networkServiceAdvertiser.isInitialized) networkServiceAdvertiser.unregisterService() } catch (_: Exception) {}
+        try { if (::streamingServer.isInitialized) streamingServer.stop() } catch (_: Exception) {}
+        try { if (::wifiReconnectManager.isInitialized) wifiReconnectManager.stop() } catch (_: Exception) {}
+        try { if (::localPlaybackLogger.isInitialized) localPlaybackLogger.shutdown() } catch (_: Exception) {}
     }
 }

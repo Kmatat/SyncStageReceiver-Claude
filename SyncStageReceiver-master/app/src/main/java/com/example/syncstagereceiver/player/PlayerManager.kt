@@ -95,14 +95,15 @@ class PlayerManager(
             val currentMedia = exoPlayer.currentMediaItem
             val filename = currentMedia?.mediaId ?: "unknown"
             val status = if (isPlaying) "PLAYING" else "PAUSED"
-            Timber.v("Playback: $status ($filename)")
+            Timber.i("Playback state changed: $status ($filename)")
 
-            // Send standard playback status
+            // Send standard playback status for every state change
             feedbackSender?.sendPlaybackStatus(status, filename, exoPlayer.currentPosition)
 
-            // Send detailed playback report for Firebase logging
+            // Send detailed playback report for Firebase logging on EVERY state change
+            sendPlaybackReport(filename, status)
+
             if (isPlaying) {
-                sendPlaybackReport(filename, "PLAYING")
                 localLogger?.logVideoStart(filename, exoPlayer.currentMediaItemIndex, exoPlayer.mediaItemCount)
             }
         }
@@ -115,7 +116,9 @@ class PlayerManager(
                 Timber.i("Video transition: $filename (reason: $reason)")
                 transitionExpectedAt = 0  // Transition completed
                 localLogger?.logVideoTransition(prevFilename, filename, "reason=$reason")
-                if (exoPlayer.isPlaying) {
+                // Always send report on transition — use playWhenReady instead of isPlaying
+                // because isPlaying is false during brief buffering between clips
+                if (exoPlayer.playWhenReady) {
                     sendPlaybackReport(filename, "PLAYING")
                 }
             }

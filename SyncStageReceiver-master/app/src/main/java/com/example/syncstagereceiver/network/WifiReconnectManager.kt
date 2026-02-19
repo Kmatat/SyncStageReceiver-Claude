@@ -159,14 +159,23 @@ class WifiReconnectManager(private val context: Context) {
     /**
      * Android 9 (API 28): Add the target network using the legacy API.
      * This directly adds and enables the network configuration.
+     *
+     * Note: wifiManager.configuredNetworks requires ACCESS_FINE_LOCATION at runtime
+     * on some devices (especially Xiaomi/MIUI). SecurityException is caught to
+     * prevent crashes when the permission hasn't been granted.
      */
     @Suppress("DEPRECATION")
     private fun addNetworkLegacy() {
         val ssid = Constants.WIFI_SSID
         val password = Constants.WIFI_PASSWORD
 
-        // Check if this network is already configured
-        val existingConfigs = wifiManager.configuredNetworks
+        // configuredNetworks can throw SecurityException if location permission not granted
+        val existingConfigs = try {
+            wifiManager.configuredNetworks
+        } catch (e: SecurityException) {
+            Timber.w("WiFi Monitor: SecurityException accessing configuredNetworks (missing location permission): ${e.message}")
+            null
+        }
         val quotedSsid = "\"$ssid\""
         val existingConfig = existingConfigs?.find { it.SSID == quotedSsid }
 
@@ -183,7 +192,12 @@ class WifiReconnectManager(private val context: Context) {
             allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK)
         }
 
-        targetNetworkId = wifiManager.addNetwork(wifiConfig)
+        targetNetworkId = try {
+            wifiManager.addNetwork(wifiConfig)
+        } catch (e: SecurityException) {
+            Timber.w("WiFi Monitor: SecurityException adding network (missing permission): ${e.message}")
+            -1
+        }
         if (targetNetworkId != -1) {
             Timber.i("WiFi Monitor: Target network added (id=$targetNetworkId, SSID=$ssid)")
         } else {
@@ -199,7 +213,13 @@ class WifiReconnectManager(private val context: Context) {
         try {
             if (!wifiManager.isWifiEnabled) {
                 Timber.w("WiFi Monitor: WiFi is disabled, enabling...")
-                wifiManager.isWifiEnabled = true
+                try {
+                    wifiManager.isWifiEnabled = true
+                } catch (e: SecurityException) {
+                    // On Android 10+ and Xiaomi MIUI, apps cannot toggle WiFi programmatically
+                    Timber.w("WiFi Monitor: Cannot enable WiFi programmatically (SecurityException): ${e.message}")
+                    return
+                }
                 // Give WiFi a moment to enable, then retry
                 handler.postDelayed({ connectToTargetNetwork() }, 2000)
                 return
@@ -208,9 +228,14 @@ class WifiReconnectManager(private val context: Context) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                 // Android 9: Use enableNetwork to force connection to our target
                 if (targetNetworkId == -1) {
-                    // Try to find it in configured networks
+                    // Try to find it in configured networks (may throw SecurityException)
                     val quotedSsid = "\"${Constants.WIFI_SSID}\""
-                    val config = wifiManager.configuredNetworks?.find { it.SSID == quotedSsid }
+                    val config = try {
+                        wifiManager.configuredNetworks?.find { it.SSID == quotedSsid }
+                    } catch (e: SecurityException) {
+                        Timber.w("WiFi Monitor: SecurityException accessing configuredNetworks: ${e.message}")
+                        null
+                    }
                     targetNetworkId = config?.networkId ?: -1
                 }
 
@@ -309,8 +334,13 @@ class WifiReconnectManager(private val context: Context) {
         try {
             Timber.w("WiFi Monitor: Toggling WiFi OFF/ON (nuclear reconnection)")
 
-            // Turn WiFi off
-            wifiManager.isWifiEnabled = false
+            // On Android 10+ / Xiaomi MIUI, programmatic WiFi toggle may be blocked
+            try {
+                wifiManager.isWifiEnabled = false
+            } catch (e: SecurityException) {
+                Timber.w("WiFi Monitor: Cannot toggle WiFi programmatically (blocked by OS): ${e.message}")
+                return
+            }
 
             // Wait briefly, then turn back on and connect to target
             handler.postDelayed({

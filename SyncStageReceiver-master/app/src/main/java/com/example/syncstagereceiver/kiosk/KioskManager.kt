@@ -2,40 +2,41 @@ package com.example.syncstagereceiver.kiosk
 
 import android.app.Activity
 import android.app.admin.DevicePolicyManager
-import android.content.ComponentName
 import android.content.Context
 import android.os.BatteryManager
 import android.provider.Settings
-import com.example.syncstagereceiver.DeviceAdminReceiver
 import timber.log.Timber
 
 class KioskManager(private val context: Context) {
 
-    private val devicePolicyManager = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-    private val adminComponent = ComponentName(context, DeviceAdminReceiver::class.java)
+    private val devicePolicyManager: DevicePolicyManager? = try {
+        context.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager
+    } catch (e: Exception) {
+        Timber.e(e, "Failed to get DevicePolicyManager")
+        null
+    }
 
     /**
-     * UPDATED:
-     * This method now only sets the "Stay On While Plugged In" feature.
-     * The call to 'startLockTask()' has been removed to prevent the crash.
-     * The app's "kiosk" behavior is now handled *only* by it being the default
-     * Home app in the AndroidManifest.xml.
+     * Sets the "Stay On While Plugged In" feature.
+     * All operations are wrapped in try-catch to prevent crashes on devices
+     * (e.g. Xiaomi MIUI) where device owner permission is not granted or
+     * DevicePolicyManager behaves differently.
      */
     fun enableKioskMode(activity: Activity) {
         Timber.d("Initializing Kiosk Mode (Setting 'Stay On While Plugged In')")
         setStayOnWhilePluggedIn()
 
-        if (devicePolicyManager.isDeviceOwnerApp(context.packageName)) {
-            // devicePolicyManager.setLockTaskPackages(adminComponent, arrayOf(context.packageName))
-            // try {
-            //     activity.startLockTask() // <-- REMOVED THIS LINE TO PREVENT CRASH
-            //     Timber.i("Kiosk Mode (Lock Task) activated.")
-            // } catch (e: Exception) {
-            //     Timber.e(e, "Failed to start lock task.")
-            // }
-            Timber.i("Device is owner, but 'startLockTask' is disabled in code.")
-        } else {
-            Timber.w("Not Device Owner. Full Kiosk mode unavailable.")
+        try {
+            val isOwner = devicePolicyManager?.isDeviceOwnerApp(context.packageName) ?: false
+            if (isOwner) {
+                Timber.i("Device is owner, but 'startLockTask' is disabled in code.")
+            } else {
+                Timber.w("Not Device Owner. Full Kiosk mode unavailable. App will run as default HOME launcher only.")
+            }
+        } catch (e: SecurityException) {
+            Timber.w("SecurityException checking device owner status (common on Xiaomi/MIUI): ${e.message}")
+        } catch (e: Exception) {
+            Timber.w(e, "Could not check device owner status")
         }
     }
 
