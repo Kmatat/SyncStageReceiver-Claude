@@ -259,6 +259,19 @@ class CommandReceiverService : Service() {
                             // Update heartbeat tracker on every message
                             lastMessageReceivedAt = System.currentTimeMillis()
 
+                            // Intercept HEARTBEAT at transport level and respond immediately
+                            // without broadcasting to the activity layer
+                            if (command.contains("\"HEARTBEAT\"") && !command.contains("\"HEARTBEAT_ACK\"")) {
+                                try {
+                                    clientOutput?.println("{\"action\":\"HEARTBEAT_ACK\"}")
+                                    clientOutput?.flush()
+                                    Timber.v("HEARTBEAT_ACK sent")
+                                } catch (e: Exception) {
+                                    Timber.e(e, "Failed to send HEARTBEAT_ACK")
+                                }
+                                continue
+                            }
+
                             Timber.d("Received TCP command: $command")
                             sendBroadcast(Intent("COMMAND_RECEIVED").apply {
                                 putExtra("COMMAND_JSON", command)
