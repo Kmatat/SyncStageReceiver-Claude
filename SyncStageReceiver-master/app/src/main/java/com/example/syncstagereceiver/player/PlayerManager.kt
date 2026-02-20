@@ -70,13 +70,21 @@ class PlayerManager(
     // Periodic playback reporting for dashboard freshness
     private val PLAYBACK_REPORT_INTERVAL_MS = 10_000L  // Report every 10 seconds while playing
 
+    // Tracks whether the Controller explicitly paused playback.
+    // Used to prevent watchdog, error-recovery and buffering callbacks
+    // from accidentally resuming the player while it should stay paused.
+    @Volatile
+    private var isPausedByController = false
+
     // Player listener extracted as a field so it can be re-attached on player rebuild
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
             when (playbackState) {
                 Player.STATE_READY -> {
                     showIdleImage(false)
-                    hideBlackOverlay()
+                    if (!isPausedByController) {
+                        hideBlackOverlay()
+                    }
                     transitionExpectedAt = 0  // Transition completed successfully
                 }
                 Player.STATE_ENDED -> {
@@ -130,12 +138,18 @@ class PlayerManager(
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            Timber.e(error, "ExoPlayer Error - attempting recovery")
+            Timber.e(error, "ExoPlayer Error")
 
             // Report error
             val filename = exoPlayer.currentMediaItem?.mediaId ?: "unknown"
             sendPlaybackReport(filename, "ERROR")
             localLogger?.logPlaybackError(filename, error.message ?: "unknown")
+
+            // Skip auto-recovery when paused by controller
+            if (isPausedByController) {
+                Timber.i("Skipping error recovery — paused by controller")
+                return
+            }
 
             // Attempt recovery
             try {
@@ -261,7 +275,9 @@ class PlayerManager(
                 }
 
                 // Transition watchdog: if we're waiting for a transition and it's taking too long
-                checkTransitionTimeout()
+                if (!isPausedByController) {
+                    checkTransitionTimeout()
+                }
 
             } catch (e: Exception) {
                 Timber.e(e, "Watchdog error")
@@ -402,6 +418,7 @@ class PlayerManager(
     ) {
         handler.post {
             try {
+                isPausedByController = false
                 // Hide black overlay when playing
                 hideBlackOverlay()
                 
@@ -535,6 +552,7 @@ class PlayerManager(
 
     fun stop() {
         handler.post {
+            isPausedByController = false
             exoPlayer.stop()
             exoPlayer.clearMediaItems()
             currentPlaylistSignature = ""
@@ -549,9 +567,11 @@ class PlayerManager(
      */
     fun pause() {
         handler.post {
+            isPausedByController = true
+            transitionExpectedAt = 0  // Clear pending transition timeout
             exoPlayer.pause()
-            showBlackOverlay()  // NEW: Show black screen instead of frozen frame
-            
+            showBlackOverlay()  // Show black screen instead of frozen frame
+
             // Report pause status
             val filename = exoPlayer.currentMediaItem?.mediaId ?: ""
             sendPlaybackReport(filename, "PAUSED")
@@ -563,6 +583,7 @@ class PlayerManager(
      */
     fun resume() {
         handler.post {
+            isPausedByController = false
             hideBlackOverlay()
             exoPlayer.play()
         }
