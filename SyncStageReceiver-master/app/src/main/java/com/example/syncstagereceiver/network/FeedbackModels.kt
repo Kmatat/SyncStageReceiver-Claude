@@ -4,25 +4,28 @@ import com.google.gson.annotations.SerializedName
 
 /**
  * ==================== FEEDBACK MODELS ====================
- * 
+ *
  * Data classes for all feedback messages sent from Receiver to Controller.
- * 
+ *
  * UPDATES:
  * - Added PlaybackReportFeedback for detailed playback logging to Firebase
  * - Added disk free space reporting
+ * - Fixed: Removed duplicate action field overrides that caused Gson serialization issues
  */
 
 /**
  * Base class for all feedback messages sent from Receiver to Controller.
+ * The action field is set via the constructor and should NOT be overridden
+ * in subclasses to avoid duplicate @SerializedName fields in the class hierarchy.
  */
 sealed class Feedback(
-    @SerializedName("action") open val action: String = "STATUS_REPORT"
+    @SerializedName("action") val action: String = "STATUS_REPORT"
 )
 
 /**
  * Sync status feedback - reports playlist sync progress
  * (e.g., "SYNCING", "COMPLETED", "ERROR")
- * 
+ *
  * UPDATED: Added diskFreeSpace to monitor device storage health
  */
 data class SyncStatusFeedback(
@@ -45,15 +48,14 @@ data class PlaybackStatusFeedback(
 ) : Feedback()
 
 /**
- * ==================== NEW: PLAYBACK REPORT FEEDBACK ====================
- * 
+ * ==================== PLAYBACK REPORT FEEDBACK ====================
+ *
  * Detailed playback report sent to Controller for Firebase logging.
  * This provides visibility into what each screen is actually playing.
- * 
+ *
  * The Controller receives this and forwards to Firebase's playback_logs collection.
  */
 data class PlaybackReportFeedback(
-    @SerializedName("action") override val action: String = "PLAYBACK_REPORT",
     @SerializedName("deviceId") val deviceId: String,
     @SerializedName("deviceName") val deviceName: String,
     @SerializedName("videoFilename") val videoFilename: String,
@@ -68,11 +70,10 @@ data class PlaybackReportFeedback(
  * Status report feedback - full device status in response to REQUEST_STATUS.
  * Includes device identification and playlist context so the Controller
  * can match this report to a specific screen on the dashboard.
- * 
+ *
  * UPDATED: Added diskFreeSpace to monitor device storage health
  */
 data class StatusReportFeedback(
-    @SerializedName("action") override val action: String = "STATUS_REPORT",
     @SerializedName("deviceId") val deviceId: String,
     @SerializedName("deviceName") val deviceName: String,
     @SerializedName("status") val status: String,
