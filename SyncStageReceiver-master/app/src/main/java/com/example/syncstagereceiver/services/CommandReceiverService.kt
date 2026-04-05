@@ -67,7 +67,9 @@ interface FeedbackSender {
         videoFilename: String,
         playlistIndex: Int,
         playlistTotal: Int,
-        positionMs: Long
+        positionMs: Long,
+        versionCode: Int = 0,
+        versionName: String = ""
     )
 }
 
@@ -152,11 +154,16 @@ class CommandReceiverService : Service() {
     private fun startServer() {
         try {
             serverSocket = ServerSocket(12345)
+            serverSocket!!.soTimeout = 5000 // 5s accept timeout for clean shutdown
             Timber.i("Server socket started on port 12345")
 
             while (serviceScope.isActive) {
                 Timber.d("Waiting for new client connection...")
-                val socket = serverSocket!!.accept()
+                val socket = try {
+                    serverSocket!!.accept()
+                } catch (_: SocketTimeoutException) {
+                    continue // Check isActive and loop
+                }
                 Timber.i("Client connected: ${socket.inetAddress.hostAddress}")
 
                 cleanupClientSocket()
@@ -223,13 +230,14 @@ class CommandReceiverService : Service() {
                             videoFilename: String,
                             playlistIndex: Int,
                             playlistTotal: Int,
-                            positionMs: Long
+                            positionMs: Long,
+                            versionCode: Int,
+                            versionName: String
                         ) {
-                            // Get free disk space
                             val freeSpace = try {
                                 java.io.File(filesDir, "videos").freeSpace
                             } catch (e: Exception) { 0L }
-                            
+
                             val feedback = StatusReportFeedback(
                                 deviceId = deviceId,
                                 deviceName = deviceName,
@@ -238,7 +246,9 @@ class CommandReceiverService : Service() {
                                 playlistIndex = playlistIndex,
                                 playlistTotal = playlistTotal,
                                 positionMs = positionMs,
-                                diskFreeSpace = freeSpace
+                                diskFreeSpace = freeSpace,
+                                versionCode = versionCode,
+                                versionName = versionName
                             )
                             sendFeedback(feedback)
                         }
@@ -311,16 +321,18 @@ class CommandReceiverService : Service() {
         }
     }
 
+    private val socketLock = Any()
+
     private fun sendFeedback(feedback: Feedback) {
-        if (feedbackSender?.isConnected() == true) {
-            serviceScope.launch {
+        serviceScope.launch {
+            synchronized(socketLock) {
                 try {
-                    val jsonFeedback = gson.toJson(feedback)
-                    if (clientOutput != null && clientSocket?.isClosed == false) {
-                        clientOutput?.println(jsonFeedback)
-                        clientOutput?.flush()
-                        Timber.v("Feedback sent: ${feedback.action}")
-                    }
+                    val output = clientOutput ?: return@synchronized
+                    val socket = clientSocket ?: return@synchronized
+                    if (socket.isClosed) return@synchronized
+                    output.println(gson.toJson(feedback))
+                    output.flush()
+                    Timber.v("Feedback sent: ${feedback.action}")
                 } catch (e: Exception) {
                     Timber.e(e, "Failed to send feedback.")
                 }

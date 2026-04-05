@@ -81,6 +81,8 @@ data class StatusReportFeedback(
     @SerializedName("playlistIndex") val playlistIndex: Int,
     @SerializedName("playlistTotal") val playlistTotal: Int,
     @SerializedName("positionMs") val positionMs: Long,
-    @SerializedName("diskFreeSpace") val diskFreeSpace: Long = 0L, // Bytes
+    @SerializedName("diskFreeSpace") val diskFreeSpace: Long = 0L,
+    @SerializedName("versionCode") val versionCode: Int = 0,
+    @SerializedName("versionName") val versionName: String = "",
     @SerializedName("timestamp") val timestamp: Long = System.currentTimeMillis()
 ) : Feedback("STATUS_REPORT")

@@ -14,6 +14,8 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.example.syncstagereceiver.services.FeedbackSender
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import com.example.syncstagereceiver.util.LocalPlaybackLogger
 import com.example.syncstagereceiver.util.TimeManager
 import timber.log.Timber
@@ -190,6 +192,7 @@ class PlayerManager(
         val filename = exoPlayer.currentMediaItem?.mediaId ?: ""
         val status = when {
             exoPlayer.isPlaying -> "PLAYING"
+            exoPlayer.playbackState == Player.STATE_BUFFERING -> "BUFFERING"
             blackOverlay?.visibility == View.VISIBLE -> "PAUSED"
             else -> "IDLE"
         }
@@ -200,7 +203,9 @@ class PlayerManager(
             videoFilename = filename,
             playlistIndex = exoPlayer.currentMediaItemIndex,
             playlistTotal = exoPlayer.mediaItemCount,
-            positionMs = exoPlayer.currentPosition
+            positionMs = exoPlayer.currentPosition,
+            versionCode = com.example.syncstagereceiver.BuildConfig.VERSION_CODE,
+            versionName = com.example.syncstagereceiver.BuildConfig.VERSION_NAME
         )
     }
 
@@ -349,13 +354,16 @@ class PlayerManager(
             val savedPlaylist = currentPlaylist.toList()
             val savedSignature = currentPlaylistSignature
 
-            // Release old player
+            // Build new player FIRST (before releasing old) for crash safety
+            val newPlayer = ExoPlayer.Builder(context).build()
+
+            // Now safe to release old player
             handler.removeCallbacks(watchdogRunnable)
             handler.removeCallbacks(playbackReportRunnable)
             exoPlayer.release()
 
-            // Build new player
-            exoPlayer = ExoPlayer.Builder(context).build()
+            // Assign new player
+            exoPlayer = newPlayer
             playerView.player = exoPlayer
             exoPlayer.volume = 0f
             exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
@@ -494,6 +502,9 @@ class PlayerManager(
                     if (!exoPlayer.isPlaying) exoPlayer.play()
                 }
 
+                // Save playback state for crash recovery
+                savePlaybackState(filenames, safeIndex, adjustedPosition)
+
             } catch (e: Exception) {
                 Timber.e(e, "Error in playPlaylist")
             }
@@ -539,6 +550,7 @@ class PlayerManager(
             exoPlayer.clearMediaItems()
             currentPlaylistSignature = ""
             currentPlaylist = emptyList()
+            clearSavedPlaybackState()
             showIdleImage(true)
             hideBlackOverlay()
         }
@@ -607,15 +619,56 @@ class PlayerManager(
         val position = exoPlayer.currentPosition
         val status = when {
             exoPlayer.isPlaying -> "PLAYING"
+            exoPlayer.playbackState == Player.STATE_BUFFERING -> "BUFFERING"
             blackOverlay?.visibility == View.VISIBLE -> "PAUSED"
             else -> "IDLE"
         }
         return Triple(status, filename, position)
     }
 
+    private fun savePlaybackState(filenames: List<String>, index: Int, position: Long) {
+        try {
+            sharedPreferences.edit()
+                .putString("last_playlist_json", Gson().toJson(filenames))
+                .putInt("last_index", index)
+                .putLong("last_position", position)
+                .putLong("last_saved_at", System.currentTimeMillis())
+                .apply()
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to save playback state")
+        }
+    }
+
+    private fun clearSavedPlaybackState() {
+        sharedPreferences.edit()
+            .remove("last_playlist_json")
+            .remove("last_index")
+            .remove("last_position")
+            .remove("last_saved_at")
+            .apply()
+    }
+
     fun tryResumeFromSavedState() {
-        Timber.d("tryResumeFromSavedState called. Waiting for Controller command.")
-        // For now, we wait for Controller to send a command
-        // Future: Read last playlist from SharedPrefs and resume
+        try {
+            val json = sharedPreferences.getString("last_playlist_json", null)
+            val savedAt = sharedPreferences.getLong("last_saved_at", 0)
+            val ageMs = System.currentTimeMillis() - savedAt
+
+            if (json == null || ageMs > 24 * 60 * 60 * 1000L) {
+                Timber.d("No recent saved state (age=${ageMs / 1000}s). Waiting for Controller command.")
+                return
+            }
+
+            val filenames: List<String> = Gson().fromJson(json, object : TypeToken<List<String>>() {}.type)
+            val index = sharedPreferences.getInt("last_index", 0)
+            val position = sharedPreferences.getLong("last_position", 0)
+
+            if (filenames.isNotEmpty()) {
+                Timber.i("Resuming from saved state: ${filenames.size} files, index=$index, pos=${position}ms (saved ${ageMs / 1000}s ago)")
+                playPlaylist(filenames, index, position, System.currentTimeMillis())
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to resume from saved state")
+        }
     }
 }

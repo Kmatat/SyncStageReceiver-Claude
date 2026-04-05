@@ -13,6 +13,10 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+
+        // WiFi credentials — set in local.properties (not committed to git)
+        buildConfigField("String", "WIFI_SSID", "\"${findProperty("WIFI_SSID") ?: ""}\"")
+        buildConfigField("String", "WIFI_PASSWORD", "\"${findProperty("WIFI_PASSWORD") ?: ""}\"")
     }
 
     compileOptions {

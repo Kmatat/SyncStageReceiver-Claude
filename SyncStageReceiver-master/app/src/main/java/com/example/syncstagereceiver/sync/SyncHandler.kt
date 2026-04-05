@@ -36,10 +36,16 @@ class SyncHandler(
     private val MAX_RETRIES = 3
     private val RETRY_DELAY_MS = 2000L
 
+    private val syncScope = CoroutineScope(
+        Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, e ->
+            Timber.e(e, "Unhandled exception in SyncHandler")
+        }
+    )
+
     data class FileManifest(val id: String, val name: String, val url: String, val hash: String)
 
     fun handleSyncPlaylist(jsonPayload: String) {
-        CoroutineScope(Dispatchers.IO).launch {
+        syncScope.launch {
             var playlistId: String? = null
             var filesToSync: List<FileManifest> = emptyList()
 

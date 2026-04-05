@@ -14,6 +14,7 @@ class MulticastReceiver(
     private val onMessageReceived: (String) -> Unit
 ) {
     private var socket: MulticastSocket? = null
+    private var multicastGroup: InetAddress? = null
     private var listenJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -34,6 +35,7 @@ class MulticastReceiver(
                 val port = 8888
                 socket = MulticastSocket(port)
                 socket?.joinGroup(group)
+                multicastGroup = group
                 socket?.soTimeout = 0 // Infinite timeout to prevent loop churn
 
                 Timber.i("MulticastReceiver listening on 239.0.0.1:$port")
@@ -49,8 +51,9 @@ class MulticastReceiver(
             } catch (e: Exception) {
                 Timber.e(e, "MulticastReceiver error")
             } finally {
-                releaseMulticastLock()
+                try { multicastGroup?.let { socket?.leaveGroup(it) } } catch (_: Exception) {}
                 socket?.close()
+                releaseMulticastLock()
             }
         }
     }
@@ -61,7 +64,9 @@ class MulticastReceiver(
 
         // Cleanup old cache entries occasionally
         if (processedCommands.size > 100) {
-            processedCommands.entries.removeIf { now - it.value > DEDUPLICATION_WINDOW_MS }
+            synchronized(processedCommands) {
+                processedCommands.entries.removeIf { now - it.value > DEDUPLICATION_WINDOW_MS }
+            }
         }
 
         // Deduplication Check
@@ -78,6 +83,7 @@ class MulticastReceiver(
 
     fun stop() {
         listenJob?.cancel()
+        try { multicastGroup?.let { socket?.leaveGroup(it) } } catch (_: Exception) {}
         socket?.close()
         releaseMulticastLock()
     }

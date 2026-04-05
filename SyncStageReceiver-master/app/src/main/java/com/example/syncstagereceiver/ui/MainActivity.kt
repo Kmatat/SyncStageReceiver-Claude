@@ -73,7 +73,7 @@ class MainActivity : AppCompatActivity() {
 
     private var commandReceiverService: CommandReceiverService? = null
     private var isBound = false
-    private var feedbackSender: FeedbackSender? = null
+    @Volatile private var feedbackSender: FeedbackSender? = null
 
     // Auto-recovery settings (faster: 10s instead of 30s)
     private val AUTO_RECOVERY_INTERVAL_MS = 10_000L  // Check every 10 seconds
