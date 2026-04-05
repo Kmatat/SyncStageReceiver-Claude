@@ -10,9 +10,7 @@ object Constants {
     // Default fallback name if no name is set
     val DEFAULT_DEVICE_NAME: String = "SyncStage-${Build.MODEL.replace(" ", "")}"
 
-    // WiFi Credentials — loaded from BuildConfig (set in local.properties, not committed)
-    val WIFI_SSID: String = com.example.syncstagereceiver.BuildConfig.WIFI_SSID
-    val WIFI_PASSWORD: String = com.example.syncstagereceiver.BuildConfig.WIFI_PASSWORD
+    // WiFi credentials removed — app reconnects to device's saved networks instead
 
     // Broadcast Action Constants
     // --- FIX: Define the action string here ---

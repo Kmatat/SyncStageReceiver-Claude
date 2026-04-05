@@ -5,28 +5,24 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
-import android.net.wifi.WifiNetworkSuggestion
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import com.example.syncstagereceiver.util.Constants
 import timber.log.Timber
 
 /**
  * ==================== WIFI RECONNECT MANAGER ====================
  *
  * Monitors WiFi connectivity and automatically attempts reconnection
- * when the connection drops. This replaces the manual process of
- * going to Settings and pressing "Connect".
+ * when the connection drops. Uses the device's already-saved WiFi networks
+ * (configured during initial device setup) — does NOT store credentials.
  *
  * Recovery strategy:
- * 1. On start, ensure the target WiFi network (from Constants) is configured
- * 2. Monitor WiFi state every 10 seconds
- * 3. On disconnect, attempt to connect to the target network
- * 4. After 3 failed reconnection attempts, toggle WiFi off/on
- * 5. Log every disconnect/reconnect event with timestamps
+ * 1. Monitor WiFi state every 10 seconds
+ * 2. On disconnect, trigger reconnect to saved networks
+ * 3. After 3 failed reconnection attempts, toggle WiFi off/on
+ * 4. Log every disconnect/reconnect event with timestamps
  */
 class WifiReconnectManager(private val context: Context) {
 
@@ -42,7 +38,6 @@ class WifiReconnectManager(private val context: Context) {
     private var consecutiveFailures = 0
     private var lastDisconnectTime: Long = 0L
     private var lastReconnectTime: Long = 0L
-    private var targetNetworkId: Int = -1
 
     private val CHECK_INTERVAL_MS = 10_000L       // Check every 10 seconds
     private val MAX_FAILURES_BEFORE_TOGGLE = 3     // Toggle WiFi after 3 failures
@@ -65,17 +60,10 @@ class WifiReconnectManager(private val context: Context) {
         }
     }
 
-    /**
-     * Start monitoring WiFi connectivity.
-     * Also ensures the target WiFi network is configured for auto-connection.
-     */
     fun start() {
         if (isRunning) return
         isRunning = true
-        Timber.i("WiFi Monitor: Started (target SSID: ${Constants.WIFI_SSID})")
-
-        // Ensure the target WiFi network is configured
-        ensureTargetNetworkConfigured()
+        Timber.i("WiFi Monitor: Started (reconnects to saved networks)")
 
         // Register network callback for immediate notifications
         try {
@@ -87,19 +75,16 @@ class WifiReconnectManager(private val context: Context) {
             Timber.e(e, "WiFi Monitor: Failed to register network callback")
         }
 
-        // If not connected, attempt to connect to the target network immediately
+        // If not connected, attempt reconnection immediately
         if (!isWifiConnected()) {
-            Timber.i("WiFi Monitor: Not connected on start, attempting to connect to ${Constants.WIFI_SSID}")
-            connectToTargetNetwork()
+            Timber.i("WiFi Monitor: Not connected on start, triggering reconnect")
+            reconnectToSavedNetwork()
         }
 
         // Start periodic check
         handler.postDelayed(checkRunnable, CHECK_INTERVAL_MS)
     }
 
-    /**
-     * Stop monitoring WiFi connectivity.
-     */
     fun stop() {
         isRunning = false
         handler.removeCallbacks(checkRunnable)
@@ -112,155 +97,31 @@ class WifiReconnectManager(private val context: Context) {
     }
 
     /**
-     * Ensure the target WiFi network (SSID/password from Constants) is
-     * configured on the device so it can auto-connect.
-     *
-     * - API 28 (Android 9): Uses WifiConfiguration + addNetwork
-     * - API 29+ (Android 10+): Uses WifiNetworkSuggestion
-     */
-    private fun ensureTargetNetworkConfigured() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Android 10+ — use WifiNetworkSuggestion
-                addNetworkSuggestion()
-            } else {
-                // Android 9 — use legacy WifiConfiguration
-                addNetworkLegacy()
-            }
-        } catch (e: Exception) {
-            Timber.e(e, "WiFi Monitor: Failed to configure target network")
-        }
-    }
-
-    /**
-     * Android 10+ (API 29): Add the target network as a suggestion.
-     * The system will auto-connect when the network is available.
-     */
-    private fun addNetworkSuggestion() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
-
-        val suggestion = WifiNetworkSuggestion.Builder()
-            .setSsid(Constants.WIFI_SSID)
-            .setWpa2Passphrase(Constants.WIFI_PASSWORD)
-            .setIsAppInteractionRequired(false)
-            .build()
-
-        // Remove any previous suggestions from this app, then add fresh
-        wifiManager.removeNetworkSuggestions(listOf(suggestion))
-        val status = wifiManager.addNetworkSuggestions(listOf(suggestion))
-
-        if (status == WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS) {
-            Timber.i("WiFi Monitor: Network suggestion added for ${Constants.WIFI_SSID}")
-        } else {
-            Timber.w("WiFi Monitor: Failed to add network suggestion, status=$status")
-        }
-    }
-
-    /**
-     * Android 9 (API 28): Add the target network using the legacy API.
-     * This directly adds and enables the network configuration.
-     *
-     * Note: wifiManager.configuredNetworks requires ACCESS_FINE_LOCATION at runtime
-     * on some devices (especially Xiaomi/MIUI). SecurityException is caught to
-     * prevent crashes when the permission hasn't been granted.
+     * Trigger reconnection to saved WiFi networks.
+     * The device already has WiFi networks configured from initial setup.
+     * We just tell the system to reconnect.
      */
     @Suppress("DEPRECATION")
-    private fun addNetworkLegacy() {
-        val ssid = Constants.WIFI_SSID
-        val password = Constants.WIFI_PASSWORD
-
-        // configuredNetworks can throw SecurityException if location permission not granted
-        val existingConfigs = try {
-            wifiManager.configuredNetworks
-        } catch (e: SecurityException) {
-            Timber.w("WiFi Monitor: SecurityException accessing configuredNetworks (missing location permission): ${e.message}")
-            null
-        }
-        val quotedSsid = "\"$ssid\""
-        val existingConfig = existingConfigs?.find { it.SSID == quotedSsid }
-
-        if (existingConfig != null) {
-            targetNetworkId = existingConfig.networkId
-            Timber.i("WiFi Monitor: Target network already configured (id=$targetNetworkId)")
-            return
-        }
-
-        // Create new WifiConfiguration for WPA2
-        val wifiConfig = WifiConfiguration().apply {
-            SSID = quotedSsid
-            preSharedKey = "\"$password\""
-            allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK)
-        }
-
-        targetNetworkId = try {
-            wifiManager.addNetwork(wifiConfig)
-        } catch (e: SecurityException) {
-            Timber.w("WiFi Monitor: SecurityException adding network (missing permission): ${e.message}")
-            -1
-        }
-        if (targetNetworkId != -1) {
-            Timber.i("WiFi Monitor: Target network added (id=$targetNetworkId, SSID=$ssid)")
-        } else {
-            Timber.e("WiFi Monitor: Failed to add target network $ssid")
-        }
-    }
-
-    /**
-     * Actively connect to the target WiFi network.
-     */
-    @Suppress("DEPRECATION")
-    private fun connectToTargetNetwork() {
+    private fun reconnectToSavedNetwork() {
         try {
             if (!wifiManager.isWifiEnabled) {
                 Timber.w("WiFi Monitor: WiFi is disabled, enabling...")
                 try {
                     wifiManager.isWifiEnabled = true
                 } catch (e: SecurityException) {
-                    // On Android 10+ and Xiaomi MIUI, apps cannot toggle WiFi programmatically
-                    Timber.w("WiFi Monitor: Cannot enable WiFi programmatically (SecurityException): ${e.message}")
+                    Timber.w("WiFi Monitor: Cannot enable WiFi programmatically: ${e.message}")
                     return
                 }
                 // Give WiFi a moment to enable, then retry
-                handler.postDelayed({ connectToTargetNetwork() }, 2000)
+                handler.postDelayed({ reconnectToSavedNetwork() }, 2000)
                 return
             }
 
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                // Android 9: Use enableNetwork to force connection to our target
-                if (targetNetworkId == -1) {
-                    // Try to find it in configured networks (may throw SecurityException)
-                    val quotedSsid = "\"${Constants.WIFI_SSID}\""
-                    val config = try {
-                        wifiManager.configuredNetworks?.find { it.SSID == quotedSsid }
-                    } catch (e: SecurityException) {
-                        Timber.w("WiFi Monitor: SecurityException accessing configuredNetworks: ${e.message}")
-                        null
-                    }
-                    targetNetworkId = config?.networkId ?: -1
-                }
-
-                if (targetNetworkId != -1) {
-                    wifiManager.disconnect()
-                    wifiManager.enableNetwork(targetNetworkId, true)
-                    wifiManager.reconnect()
-                    Timber.i("WiFi Monitor: Connecting to target network (id=$targetNetworkId, SSID=${Constants.WIFI_SSID})")
-                } else {
-                    // Network not configured yet, add it first
-                    addNetworkLegacy()
-                    if (targetNetworkId != -1) {
-                        wifiManager.enableNetwork(targetNetworkId, true)
-                        wifiManager.reconnect()
-                        Timber.i("WiFi Monitor: Added and connecting to ${Constants.WIFI_SSID}")
-                    }
-                }
-            } else {
-                // Android 10+: Suggestions are passive — trigger a reconnect
-                // and the system should prefer our suggested network
-                wifiManager.reconnect()
-                Timber.i("WiFi Monitor: Reconnect triggered (suggestion-based for ${Constants.WIFI_SSID})")
-            }
+            // Trigger reconnect — system will pick the best saved network
+            wifiManager.reconnect()
+            Timber.i("WiFi Monitor: Reconnect triggered (using saved networks)")
         } catch (e: Exception) {
-            Timber.e(e, "WiFi Monitor: Failed to connect to target network")
+            Timber.e(e, "WiFi Monitor: Failed to trigger reconnection")
         }
     }
 
@@ -279,7 +140,7 @@ class WifiReconnectManager(private val context: Context) {
                         toggleWifi()
                         consecutiveFailures = 0
                     } else {
-                        attemptReconnection()
+                        reconnectToSavedNetwork()
                     }
                 } else {
                     if (consecutiveFailures > 0) {
@@ -297,9 +158,6 @@ class WifiReconnectManager(private val context: Context) {
         }
     }
 
-    /**
-     * Check if WiFi is currently connected with internet capability.
-     */
     private fun isWifiConnected(): Boolean {
         val activeNetwork = connectivityManager.activeNetwork ?: return false
         val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork) ?: return false
@@ -307,21 +165,8 @@ class WifiReconnectManager(private val context: Context) {
     }
 
     /**
-     * Attempt to reconnect to WiFi — specifically to the target network.
-     */
-    @Suppress("DEPRECATION")
-    private fun attemptReconnection() {
-        try {
-            Timber.i("WiFi Monitor: Attempting reconnection to ${Constants.WIFI_SSID}...")
-            connectToTargetNetwork()
-        } catch (e: Exception) {
-            Timber.e(e, "WiFi Monitor: Reconnection attempt failed")
-        }
-    }
-
-    /**
      * Nuclear option: toggle WiFi off and back on.
-     * After re-enabling, connect to the target network.
+     * After re-enabling, the system auto-connects to saved networks.
      */
     @Suppress("DEPRECATION")
     private fun toggleWifi() {
@@ -334,25 +179,21 @@ class WifiReconnectManager(private val context: Context) {
         try {
             Timber.w("WiFi Monitor: Toggling WiFi OFF/ON (nuclear reconnection)")
 
-            // On Android 10+ / Xiaomi MIUI, programmatic WiFi toggle may be blocked
             try {
                 wifiManager.isWifiEnabled = false
             } catch (e: SecurityException) {
-                Timber.w("WiFi Monitor: Cannot toggle WiFi programmatically (blocked by OS): ${e.message}")
+                Timber.w("WiFi Monitor: Cannot toggle WiFi programmatically: ${e.message}")
                 return
             }
 
-            // Wait briefly, then turn back on and connect to target
             handler.postDelayed({
                 try {
                     wifiManager.isWifiEnabled = true
-                    Timber.i("WiFi Monitor: WiFi re-enabled, connecting to ${Constants.WIFI_SSID}...")
-                    // Give WiFi a moment to scan, then connect
-                    handler.postDelayed({ connectToTargetNetwork() }, 3000)
+                    Timber.i("WiFi Monitor: WiFi re-enabled, system will auto-connect to saved networks")
                 } catch (e: Exception) {
                     Timber.e(e, "WiFi Monitor: Failed to re-enable WiFi")
                 }
-            }, 2000)  // 2 second delay between off and on
+            }, 2000)
 
         } catch (e: Exception) {
             Timber.e(e, "WiFi Monitor: WiFi toggle failed")
