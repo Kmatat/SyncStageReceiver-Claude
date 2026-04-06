@@ -164,7 +164,11 @@ class SyncHandler(
         val targetFile = fileHandler.getLocalFile(file.name)
 
         // Check existing live file
-        if (targetFile.exists()) {
+        if (targetFile.exists() && targetFile.length() > 1000) {
+            if (file.hash.isEmpty()) {
+                Timber.d("File exists (no hash to verify): ${file.name}")
+                return
+            }
             val localHash = verificationUtils.getFileSha256(targetFile)
             if (localHash != null && localHash.equals(file.hash, ignoreCase = true)) {
                 Timber.d("Valid file exists: ${file.name}")
@@ -216,11 +220,13 @@ class SyncHandler(
                 }
             }
 
-            // Verify hash
-            val downloadedHash = verificationUtils.getFileSha256(tempFile)
-            if (downloadedHash == null || !downloadedHash.equals(file.hash, ignoreCase = true)) {
-                tempFile.delete()
-                throw Exception("Hash mismatch for ${file.name}")
+            // Verify hash (skip if controller didn't provide one)
+            if (file.hash.isNotEmpty()) {
+                val downloadedHash = verificationUtils.getFileSha256(tempFile)
+                if (downloadedHash == null || !downloadedHash.equals(file.hash, ignoreCase = true)) {
+                    tempFile.delete()
+                    throw Exception("Hash mismatch for ${file.name}")
+                }
             }
 
             Timber.i("Download completed: ${file.name}")

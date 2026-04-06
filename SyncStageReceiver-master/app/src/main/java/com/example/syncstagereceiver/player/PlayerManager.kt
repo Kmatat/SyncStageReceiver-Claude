@@ -454,6 +454,7 @@ class PlayerManager(
                         }
                     }
 
+                    Timber.i("Playlist loading: ${mediaItems.size}/${filenames.size} files valid")
                     if (mediaItems.isNotEmpty()) {
                         exoPlayer.setMediaItems(mediaItems)
                         exoPlayer.prepare()
