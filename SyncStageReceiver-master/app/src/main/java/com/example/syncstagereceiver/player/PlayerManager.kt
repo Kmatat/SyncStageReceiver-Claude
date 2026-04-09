@@ -65,6 +65,9 @@ class PlayerManager(
     private var activeTimelineFilenames: List<String> = emptyList()
     private var timelinePausePositionMs: Long = 0L
 
+    /** True when timeline sync is active. Legacy PLAY/PAUSE should be ignored. */
+    fun isTimelineActive(): Boolean = activeTimelineStart > 0L
+
     // Watchdog for detecting stuck playback (aggressive recovery)
     private var lastWatchdogPosition: Long = 0L
     private var watchdogStuckCount: Int = 0

@@ -51,9 +51,14 @@ class PlaybackHandler(
     }
     
     /**
-     * Handle PLAY command - start or sync video playback
+     * Handle PLAY command - start or sync video playback.
+     * Ignored when timeline sync is active (PLAY_TIMELINE takes priority).
      */
     private fun handlePlayCommand(command: JsonObject) {
+        if (playerManager.isTimelineActive()) {
+            Timber.d("Ignoring legacy PLAY — timeline sync is active")
+            return
+        }
         // 1. Extract Playlist
         val playlistArray = command.getAsJsonArray("playlist")
         val playlist = if (playlistArray != null) {
@@ -86,6 +91,10 @@ class PlaybackHandler(
      * Handle PAUSE command - pause playback and show black screen
      */
     private fun handlePauseCommand() {
+        if (playerManager.isTimelineActive()) {
+            Timber.d("Ignoring legacy PAUSE — timeline sync is active")
+            return
+        }
         Timber.i("PAUSE command received - showing black screen")
         playerManager.pause()  // This now shows black overlay
     }
