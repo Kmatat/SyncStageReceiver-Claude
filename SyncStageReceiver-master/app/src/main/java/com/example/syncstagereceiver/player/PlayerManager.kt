@@ -72,6 +72,10 @@ class PlayerManager(
     // Periodic playback reporting for dashboard freshness
     private val PLAYBACK_REPORT_INTERVAL_MS = 10_000L  // Report every 10 seconds while playing
 
+    // Missing file retry: periodically check if skipped files have been synced
+    private val MISSING_FILE_RETRY_INTERVAL_MS = 15_000L  // Check every 15 seconds
+    private var missingFileCount: Int = 0
+
     // Player listener extracted as a field so it can be re-attached on player rebuild
     private val playerListener = object : Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -164,6 +168,9 @@ class PlayerManager(
 
         // Start periodic playback reporting for dashboard
         startPeriodicReporting()
+
+        // Start missing file retry timer
+        startMissingFileRetry()
     }
     
     // ==================== PLAYBACK REPORTING (NEW) ====================
@@ -227,6 +234,29 @@ class PlayerManager(
 
     private fun startPeriodicReporting() {
         handler.postDelayed(playbackReportRunnable, PLAYBACK_REPORT_INTERVAL_MS)
+    }
+
+    // ==================== MISSING FILE RETRY ====================
+
+    /**
+     * Periodically check if previously missing files have been synced to disk.
+     * When files become available, reload the full playlist so no videos are skipped.
+     */
+    private val missingFileRetryRunnable = object : Runnable {
+        override fun run() {
+            try {
+                if (missingFileCount > 0 && currentPlaylist.isNotEmpty()) {
+                    reloadPlaylistIfFilesAvailable()
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Missing file retry error")
+            }
+            handler.postDelayed(this, MISSING_FILE_RETRY_INTERVAL_MS)
+        }
+    }
+
+    private fun startMissingFileRetry() {
+        handler.postDelayed(missingFileRetryRunnable, MISSING_FILE_RETRY_INTERVAL_MS)
     }
 
     // ==================== WATCHDOG TIMER ====================
@@ -363,6 +393,7 @@ class PlayerManager(
             // Now safe to release old player
             handler.removeCallbacks(watchdogRunnable)
             handler.removeCallbacks(playbackReportRunnable)
+            handler.removeCallbacks(missingFileRetryRunnable)
             exoPlayer.release()
 
             // Assign new player
@@ -378,26 +409,20 @@ class PlayerManager(
             // Reload playlist if we had one
             if (savedPlaylist.isNotEmpty()) {
                 currentPlaylistSignature = ""  // Force reload
-                val mediaItems = savedPlaylist.mapNotNull { filename ->
-                    val file = File(context.filesDir, "videos/$filename")
-                    if (file.exists() && file.length() > 1000) {
-                        MediaItem.Builder()
-                            .setUri(file.absolutePath)
-                            .setMediaId(filename)
-                            .build()
-                    } else null
-                }
+                val mediaItems = buildValidMediaItems(savedPlaylist)
+                missingFileCount = savedPlaylist.size - mediaItems.size
                 if (mediaItems.isNotEmpty()) {
                     exoPlayer.setMediaItems(mediaItems)
                     exoPlayer.prepare()
                     currentPlaylistSignature = savedSignature
-                    Timber.i("Nuclear recovery: Rebuilt player with ${mediaItems.size} items")
+                    Timber.i("Nuclear recovery: Rebuilt player with ${mediaItems.size}/${savedPlaylist.size} items")
                 }
             }
 
-            // Restart watchdog and periodic reporting
+            // Restart watchdog, periodic reporting, and missing file retry
             startWatchdog()
             startPeriodicReporting()
+            startMissingFileRetry()
         } catch (e: Exception) {
             Timber.e(e, "Nuclear recovery failed completely")
         }
@@ -444,20 +469,16 @@ class PlayerManager(
                     // NEW: Memory cleanup before loading new playlist
                     cleanupBeforePlaylistChange()
 
-                    val mediaItems = filenames.mapNotNull { filename ->
-                        val file = File(context.filesDir, "videos/$filename")
-                        if (file.exists() && file.length() > 1000) {  // Validate file exists and > 1KB
-                            MediaItem.Builder()
-                                .setUri(file.absolutePath)
-                                .setMediaId(filename)
-                                .build()
-                        } else {
-                            Timber.e("MISSING/INVALID FILE: $filename - Skipping")
-                            null
-                        }
+                    val mediaItems = buildValidMediaItems(filenames)
+
+                    // Log which specific files are missing
+                    val validIds = mediaItems.map { it.mediaId }.toSet()
+                    filenames.filter { it !in validIds }.forEach { missing ->
+                        Timber.e("MISSING/INVALID FILE: $missing - Skipping")
                     }
 
                     val skipped = filenames.size - mediaItems.size
+                    missingFileCount = skipped
                     if (skipped > 0) {
                         Timber.w("Playlist: $skipped/${filenames.size} files missing or invalid")
                     }
@@ -482,7 +503,21 @@ class PlayerManager(
                 val SPEED_CORRECTION_THRESHOLD_MS = 50L
 
                 val actualItemCount = exoPlayer.mediaItemCount
-                val safeIndex = if (targetIndex < actualItemCount) targetIndex else 0
+                // Map targetIndex from the full playlist to the filtered ExoPlayer playlist.
+                // The Controller calculates targetIndex based on all filenames, but some may
+                // have been filtered out. Find the target filename and locate it by mediaId.
+                val targetFilename = filenames.getOrNull(targetIndex)
+                val mappedIndex = if (targetFilename != null && actualItemCount > 0) {
+                    // Search ExoPlayer's media items for the target filename
+                    (0 until actualItemCount).firstOrNull { i ->
+                        exoPlayer.getMediaItemAt(i).mediaId == targetFilename
+                    } ?: -1
+                } else -1
+                val safeIndex = when {
+                    mappedIndex >= 0 -> mappedIndex
+                    targetIndex < actualItemCount -> targetIndex
+                    else -> 0
+                }
 
                 val isWrongVideo = currentIndex != safeIndex
                 val drift = adjustedPosition - currentPos
@@ -541,14 +576,87 @@ class PlayerManager(
     }
 
     /**
-     * Invalidate the cached playlist signature so the next PLAY command
-     * forces ExoPlayer to reload media items from disk.
-     * Call this after SYNC_PLAYLIST completes to ensure updated files are picked up.
+     * Invalidate the cached playlist signature and immediately reload the playlist
+     * with all now-available files. Called after SYNC_PLAYLIST completes.
+     *
+     * Previously this only cleared the signature and waited for the next PLAY command,
+     * but the Controller doesn't re-send PLAY to already-playing devices, so files
+     * that were missing during the initial load would never get added.
      */
     fun invalidatePlaylistCache() {
         handler.post {
-            Timber.i("Playlist cache invalidated (sync completed)")
+            Timber.i("Playlist cache invalidated (sync completed) - reloading playlist")
             currentPlaylistSignature = ""
+            if (currentPlaylist.isNotEmpty()) {
+                reloadPlaylistIfFilesAvailable()
+            }
+        }
+    }
+
+    /**
+     * Check if previously missing files are now available on disk and reload
+     * the ExoPlayer playlist to include them. Preserves current playback position.
+     */
+    private fun reloadPlaylistIfFilesAvailable() {
+        val filenames = currentPlaylist
+        if (filenames.isEmpty()) return
+
+        val mediaItems = buildValidMediaItems(filenames)
+        val nowMissing = filenames.size - mediaItems.size
+        val currentLoadedCount = exoPlayer.mediaItemCount
+
+        if (mediaItems.size <= currentLoadedCount) {
+            // No new files became available (or count decreased — shouldn't happen)
+            missingFileCount = nowMissing
+            return
+        }
+
+        // New files are available — reload the playlist
+        Timber.i("Playlist reload: ${mediaItems.size} files now available (was $currentLoadedCount, total ${filenames.size})")
+
+        // Remember what's currently playing so we can resume at the same video
+        val currentMediaId = exoPlayer.currentMediaItem?.mediaId
+        val currentPos = exoPlayer.currentPosition
+
+        cleanupBeforePlaylistChange()
+        exoPlayer.setMediaItems(mediaItems)
+        exoPlayer.prepare()
+
+        // Find the previously-playing video in the new (expanded) playlist
+        val resumeIndex = if (currentMediaId != null) {
+            mediaItems.indexOfFirst { it.mediaId == currentMediaId }.takeIf { it >= 0 } ?: 0
+        } else 0
+
+        exoPlayer.seekTo(resumeIndex, currentPos)
+        exoPlayer.playWhenReady = true
+
+        // Update signature and missing count
+        currentPlaylistSignature = filenames.joinToString(",") { filename ->
+            val f = File(context.filesDir, "videos/$filename")
+            "$filename:${f.length()}:${f.lastModified()}"
+        }
+        missingFileCount = nowMissing
+
+        if (nowMissing > 0) {
+            Timber.w("Playlist reload: still missing $nowMissing/${filenames.size} files")
+        } else {
+            Timber.i("Playlist reload: all ${filenames.size} files now loaded")
+        }
+    }
+
+    /**
+     * Build validated MediaItems from a filename list.
+     * Returns only files that exist on disk and are > 1KB.
+     */
+    private fun buildValidMediaItems(filenames: List<String>): List<MediaItem> {
+        return filenames.mapNotNull { filename ->
+            val file = File(context.filesDir, "videos/$filename")
+            if (file.exists() && file.length() > 1000) {
+                MediaItem.Builder()
+                    .setUri(file.absolutePath)
+                    .setMediaId(filename)
+                    .build()
+            } else null
         }
     }
 
@@ -591,6 +699,7 @@ class PlayerManager(
     fun releasePlayer() {
         handler.removeCallbacks(watchdogRunnable)
         handler.removeCallbacks(playbackReportRunnable)
+        handler.removeCallbacks(missingFileRetryRunnable)
         handler.post {
             exoPlayer.release()
         }
