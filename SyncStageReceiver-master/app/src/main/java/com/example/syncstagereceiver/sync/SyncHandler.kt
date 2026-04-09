@@ -60,7 +60,7 @@ class SyncHandler(
                         id = it["id"] ?: return@mapNotNull null,
                         name = it["name"] ?: return@mapNotNull null,
                         url = it["url"] ?: return@mapNotNull null,
-                        hash = it["hash"] ?: return@mapNotNull null,
+                        hash = it["hash"] ?: "",
                     )
                 } ?: emptyList()
 
