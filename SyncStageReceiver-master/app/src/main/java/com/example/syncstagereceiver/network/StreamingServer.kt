@@ -42,7 +42,7 @@ class StreamingServer(private val context: Context) {
                             // Use LocalFileContent which properly handles:
                             // - Content-Length header (so receiver knows total size)
                             // - Range requests (HTTP 206 Partial Content for download resume)
-                            call.respond(LocalFileContent(videoFile, ContentType.Video.MP4))
+                            call.respond(LocalFileContent(videoFile))
                         } else {
                             call.respond(HttpStatusCode.NotFound)
                         }
