@@ -576,19 +576,36 @@ class PlayerManager(
     }
 
     /**
-     * Invalidate the cached playlist signature and immediately reload the playlist
-     * with all now-available files. Called after SYNC_PLAYLIST completes.
+     * Called when SYNC_PLAYLIST completes. Invalidates the playlist cache and
+     * auto-reloads the player so the loop list immediately reflects the newly
+     * synced files. If playlist content changed, does a full reload. If same
+     * playlist, preserves playback position while picking up newly available files.
      *
-     * Previously this only cleared the signature and waited for the next PLAY command,
-     * but the Controller doesn't re-send PLAY to already-playing devices, so files
-     * that were missing during the initial load would never get added.
+     * @param syncedFileNames the file names from the completed sync manifest
      */
-    fun invalidatePlaylistCache() {
+    fun onSyncCompleted(syncedFileNames: List<String>) {
         handler.post {
-            Timber.i("Playlist cache invalidated (sync completed) - reloading playlist")
+            Timber.i("Sync completed with ${syncedFileNames.size} files. Invalidating playlist cache.")
             currentPlaylistSignature = ""
-            if (currentPlaylist.isNotEmpty()) {
-                reloadPlaylistIfFilesAvailable()
+
+            val isActive = exoPlayer.isPlaying || exoPlayer.playWhenReady
+
+            if (isActive && syncedFileNames.isNotEmpty()) {
+                if (syncedFileNames != currentPlaylist) {
+                    // Playlist content changed — full reload with new files
+                    Timber.i("Playlist changed after sync (was ${currentPlaylist.size} files, now ${syncedFileNames.size}). Auto-reloading player.")
+                    currentPlaylist = syncedFileNames
+                    reloadPlaylistIfFilesAvailable()
+                } else {
+                    // Same playlist — reload to pick up any newly available files
+                    Timber.i("Same playlist after sync. Reloading to pick up new files.")
+                    reloadPlaylistIfFilesAvailable()
+                }
+            } else if (syncedFileNames.isNotEmpty()) {
+                // Player was idle — save the synced list so auto-resume can use it
+                currentPlaylist = syncedFileNames
+                savePlaybackState(syncedFileNames, 0, 0)
+                Timber.i("Player idle. Saved synced playlist for future resume.")
             }
         }
     }
@@ -605,13 +622,13 @@ class PlayerManager(
         val nowMissing = filenames.size - mediaItems.size
         val currentLoadedCount = exoPlayer.mediaItemCount
 
-        if (mediaItems.size <= currentLoadedCount) {
-            // No new files became available (or count decreased — shouldn't happen)
+        if (mediaItems.size <= currentLoadedCount && mediaItems.size == currentLoadedCount) {
+            // No new files became available
             missingFileCount = nowMissing
             return
         }
 
-        // New files are available — reload the playlist
+        // New files are available or playlist changed — reload
         Timber.i("Playlist reload: ${mediaItems.size} files now available (was $currentLoadedCount, total ${filenames.size})")
 
         // Remember what's currently playing so we can resume at the same video

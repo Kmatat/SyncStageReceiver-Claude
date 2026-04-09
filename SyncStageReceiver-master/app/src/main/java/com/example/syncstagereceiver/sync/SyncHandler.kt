@@ -30,7 +30,7 @@ class SyncHandler(
     private val verificationUtils: VerificationUtils
 ) {
     var feedbackSender: FeedbackSender? = null
-    var onSyncCompleted: (() -> Unit)? = null
+    var onSyncCompleted: ((List<String>) -> Unit)? = null
 
     // Retry configuration
     private val MAX_RETRIES = 3
@@ -126,14 +126,16 @@ class SyncHandler(
                     throw Exception("Failed to finalize: $failedFinalizations")
                 }
 
-                // Cleanup old files
-                fileHandler.cleanupOldFiles(filesToSync.map { it.name })
-
                 feedbackSender?.sendSyncStatus("COMPLETED", playlistId, filesToSync.size)
                 Timber.i("Sync completed successfully for playlist $playlistId")
 
-                // Notify that files changed so the player reloads on next PLAY
-                onSyncCompleted?.invoke()
+                // Notify player BEFORE cleanup so it reloads with new files
+                // while old files still exist on disk (prevents ExoPlayer errors)
+                val syncedFileNames = filesToSync.map { it.name }
+                onSyncCompleted?.invoke(syncedFileNames)
+
+                // Cleanup old files AFTER player has reloaded
+                fileHandler.cleanupOldFiles(syncedFileNames)
 
             } catch (e: Exception) {
                 Timber.e(e, "Sync Failed")

@@ -155,7 +155,7 @@ class MainActivity : AppCompatActivity() {
 
         playbackHandler = PlaybackHandler(playerManager, fileHandler, gson)
         syncHandler = SyncHandler(fileHandler, gson, verificationUtils)
-        syncHandler.onSyncCompleted = { playerManager.invalidatePlaylistCache() }
+        syncHandler.onSyncCompleted = { syncedFileNames -> playerManager.onSyncCompleted(syncedFileNames) }
 
         // --- Non-critical subsystems: each wrapped individually so one failure ---
         // --- doesn't crash the entire app startup.                             ---
