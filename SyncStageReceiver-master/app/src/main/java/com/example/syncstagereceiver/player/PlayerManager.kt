@@ -58,6 +58,13 @@ class PlayerManager(
     private val deviceName: String
         get() = sharedPreferences.getString("device_name", deviceId) ?: deviceId
     
+    // Timeline sync state
+    private var activeTimelineStart: Long = 0L
+    private var activeTimelineDurations: List<Long> = emptyList()
+    private var activeTimelineTotalDuration: Long = 0L
+    private var activeTimelineFilenames: List<String> = emptyList()
+    private var timelinePausePositionMs: Long = 0L
+
     // Watchdog for detecting stuck playback (aggressive recovery)
     private var lastWatchdogPosition: Long = 0L
     private var watchdogStuckCount: Int = 0
@@ -554,6 +561,189 @@ class PlayerManager(
         }
     }
     
+    // ==================== TIMELINE SYNC LOOP ====================
+
+    private val timelineSyncRunnable = object : Runnable {
+        override fun run() {
+            try {
+                if (activeTimelineStart <= 0L) return
+
+                val now = timeManager.getSynchronizedTime()
+                val elapsed = now - activeTimelineStart
+                val loopPosition = elapsed % activeTimelineTotalDuration
+
+                val (expectedIndex, expectedOffset) = calculateTimelinePosition(loopPosition, activeTimelineDurations)
+
+                val actualIndex = exoPlayer.currentMediaItemIndex
+                val actualPosition = exoPlayer.currentPosition
+                val isWrongVideo = actualIndex != expectedIndex
+                val drift = expectedOffset - actualPosition
+                val absDrift = abs(drift)
+
+                if (isWrongVideo || absDrift > 200L) {
+                    Timber.w("Timeline sync: HARD SEEK - expected idx=$expectedIndex@${expectedOffset}ms, actual idx=$actualIndex@${actualPosition}ms (drift=${drift}ms)")
+                    exoPlayer.seekTo(expectedIndex, expectedOffset)
+                    exoPlayer.playbackParameters = PlaybackParameters(1.0f)
+                } else if (absDrift > 50L) {
+                    if (drift > 0) {
+                        Timber.v("Timeline sync: Behind by ${drift}ms - speed 1.03x")
+                        exoPlayer.playbackParameters = PlaybackParameters(1.03f)
+                    } else {
+                        Timber.v("Timeline sync: Ahead by ${absDrift}ms - speed 0.97x")
+                        exoPlayer.playbackParameters = PlaybackParameters(0.97f)
+                    }
+                } else {
+                    if (exoPlayer.playbackParameters.speed != 1.0f) {
+                        exoPlayer.playbackParameters = PlaybackParameters(1.0f)
+                    }
+                }
+
+                handler.postDelayed(this, 2000L)
+            } catch (e: Exception) {
+                Timber.e(e, "Timeline sync loop error")
+                handler.postDelayed(this, 2000L)
+            }
+        }
+    }
+
+    /**
+     * Calculate which video index and offset within that video corresponds
+     * to a given loopPosition within the total timeline duration.
+     */
+    private fun calculateTimelinePosition(loopPosition: Long, durations: List<Long>): Pair<Int, Long> {
+        var remaining = loopPosition
+        for ((index, duration) in durations.withIndex()) {
+            if (remaining < duration) return Pair(index, remaining)
+            remaining -= duration
+        }
+        return Pair(0, 0L)
+    }
+
+    // ==================== TIMELINE PLAYBACK CONTROL ====================
+
+    /**
+     * Start timeline-based playback. The controller announces a timeline
+     * (playlist + absolute start time) and each receiver independently
+     * calculates its own position and self-corrects continuously.
+     */
+    fun playTimeline(
+        filenames: List<String>,
+        durations: List<Long>,
+        timelineStart: Long,
+        totalDuration: Long
+    ) {
+        handler.post {
+            try {
+                // Store timeline parameters
+                activeTimelineFilenames = filenames
+                activeTimelineDurations = durations
+                activeTimelineStart = timelineStart
+                activeTimelineTotalDuration = totalDuration
+
+                // Hide black overlay, show player
+                hideBlackOverlay()
+                showIdleImage(false)
+
+                if (filenames.isEmpty()) {
+                    stop()
+                    return@post
+                }
+
+                // Load playlist if changed (same signature-based detection as playPlaylist)
+                val newSignature = filenames.joinToString(",") { filename ->
+                    val f = File(context.filesDir, "videos/$filename")
+                    "$filename:${f.length()}:${f.lastModified()}"
+                }
+                if (newSignature != currentPlaylistSignature) {
+                    Timber.i("Timeline: Loading NEW playlist: $filenames")
+
+                    cleanupBeforePlaylistChange()
+
+                    val mediaItems = buildValidMediaItems(filenames)
+
+                    val validIds = mediaItems.map { it.mediaId }.toSet()
+                    filenames.filter { it !in validIds }.forEach { missing ->
+                        Timber.e("Timeline: MISSING/INVALID FILE: $missing - Skipping")
+                    }
+
+                    val skipped = filenames.size - mediaItems.size
+                    missingFileCount = skipped
+                    if (skipped > 0) {
+                        Timber.w("Timeline: $skipped/${filenames.size} files missing or invalid")
+                    }
+                    if (mediaItems.isNotEmpty()) {
+                        exoPlayer.setMediaItems(mediaItems)
+                        exoPlayer.prepare()
+                        currentPlaylistSignature = newSignature
+                        currentPlaylist = filenames
+                    } else {
+                        Timber.e("Timeline: No valid files found in playlist!")
+                        feedbackSender?.sendPlaybackStatus("ERROR", "NO_FILES", 0)
+                        return@post
+                    }
+                }
+
+                // Calculate initial position and seek
+                val now = timeManager.getSynchronizedTime()
+                val elapsed = now - timelineStart
+                val loopPosition = elapsed % totalDuration
+                val (startIndex, startOffset) = calculateTimelinePosition(loopPosition, durations)
+
+                Timber.i("Timeline: Starting at index=$startIndex, offset=${startOffset}ms (elapsed=${elapsed}ms, loop=${loopPosition}ms)")
+                exoPlayer.seekTo(startIndex, startOffset)
+                exoPlayer.playbackParameters = PlaybackParameters(1.0f)
+                exoPlayer.playWhenReady = true
+                exoPlayer.play()
+
+                // Start continuous self-sync loop
+                handler.removeCallbacks(timelineSyncRunnable)
+                handler.postDelayed(timelineSyncRunnable, 2000L)
+
+                Timber.i("Timeline: Playback started with ${filenames.size} files, totalDuration=${totalDuration}ms")
+            } catch (e: Exception) {
+                Timber.e(e, "Error in playTimeline")
+            }
+        }
+    }
+
+    /**
+     * Pause timeline playback. Stops the self-sync loop, pauses ExoPlayer,
+     * and shows the black overlay.
+     */
+    fun pauseTimeline(pausePositionMs: Long) {
+        handler.post {
+            try {
+                // Stop the self-sync loop
+                handler.removeCallbacks(timelineSyncRunnable)
+
+                // Clear active timeline fields
+                activeTimelineStart = 0L
+                activeTimelineDurations = emptyList()
+                activeTimelineTotalDuration = 0L
+                activeTimelineFilenames = emptyList()
+
+                // Pause ExoPlayer
+                exoPlayer.pause()
+                exoPlayer.playbackParameters = PlaybackParameters(1.0f)
+
+                // Show black overlay
+                showBlackOverlay()
+
+                // Store pause position for potential resume
+                timelinePausePositionMs = pausePositionMs
+
+                // Send PAUSED feedback
+                val filename = exoPlayer.currentMediaItem?.mediaId ?: ""
+                feedbackSender?.sendPlaybackStatus("PAUSED", filename, exoPlayer.currentPosition)
+                sendPlaybackReport(filename, "PAUSED")
+
+                Timber.i("Timeline: Paused at position=${pausePositionMs}ms")
+            } catch (e: Exception) {
+                Timber.e(e, "Error in pauseTimeline")
+            }
+        }
+    }
+
     /**
      * NEW: Clean up memory before loading a new playlist.
      * Prevents OOM crashes on devices with limited RAM.
@@ -679,6 +869,8 @@ class PlayerManager(
 
     fun stop() {
         handler.post {
+            handler.removeCallbacks(timelineSyncRunnable)
+            activeTimelineStart = 0L
             exoPlayer.stop()
             exoPlayer.clearMediaItems()
             currentPlaylistSignature = ""
@@ -717,6 +909,8 @@ class PlayerManager(
         handler.removeCallbacks(watchdogRunnable)
         handler.removeCallbacks(playbackReportRunnable)
         handler.removeCallbacks(missingFileRetryRunnable)
+        handler.removeCallbacks(timelineSyncRunnable)
+        activeTimelineStart = 0L
         handler.post {
             exoPlayer.release()
         }

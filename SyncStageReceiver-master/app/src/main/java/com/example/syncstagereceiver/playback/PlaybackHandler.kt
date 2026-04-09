@@ -32,6 +32,8 @@ class PlaybackHandler(
             when (action) {
                 "PLAY" -> handlePlayCommand(command)
                 "PAUSE" -> handlePauseCommand()
+                "PLAY_TIMELINE" -> handlePlayTimelineCommand(command)
+                "PAUSE_TIMELINE" -> handlePauseTimelineCommand(command)
                 "STOP" -> handleStopCommand()
                 "REQUEST_STATUS" -> handleRequestStatus()
                 "HEARTBEAT" -> {
@@ -103,5 +105,37 @@ class PlaybackHandler(
     private fun handleRequestStatus() {
         Timber.d("REQUEST_STATUS received, sending full STATUS_REPORT")
         playerManager.sendCurrentStatusReport()
+    }
+
+    /**
+     * Handle PLAY_TIMELINE command - start timeline-based synchronized playback.
+     * Each receiver independently calculates its position and self-corrects.
+     */
+    private fun handlePlayTimelineCommand(command: JsonObject) {
+        val playlistArray = command.getAsJsonArray("playlist")
+        val playlist = playlistArray?.map { it.asString } ?: emptyList()
+
+        val durationsArray = command.getAsJsonArray("durations")
+        val durations = durationsArray?.map { it.asLong } ?: emptyList()
+
+        val timelineStart = command.get("timelineStart")?.asLong ?: 0L
+        val totalDuration = command.get("totalDuration")?.asLong ?: 0L
+
+        if (playlist.isNotEmpty() && durations.isNotEmpty() && timelineStart > 0L && totalDuration > 0L) {
+            Timber.i("PLAY_TIMELINE command: ${playlist.size} files, timelineStart=$timelineStart, totalDuration=$totalDuration")
+            playerManager.playTimeline(playlist, durations, timelineStart, totalDuration)
+        } else {
+            Timber.w("Invalid PLAY_TIMELINE command: playlist=${playlist.size}, durations=${durations.size}, timelineStart=$timelineStart, totalDuration=$totalDuration")
+            feedbackSender?.sendPlaybackStatus("ERROR", "INVALID_TIMELINE", 0)
+        }
+    }
+
+    /**
+     * Handle PAUSE_TIMELINE command - pause timeline playback and show black screen.
+     */
+    private fun handlePauseTimelineCommand(command: JsonObject) {
+        val pausePosition = command.get("pausePosition")?.asLong ?: 0L
+        Timber.i("PAUSE_TIMELINE command received - pausePosition=$pausePosition")
+        playerManager.pauseTimeline(pausePosition)
     }
 }

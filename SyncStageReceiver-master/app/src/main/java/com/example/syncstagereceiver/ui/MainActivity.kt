@@ -305,7 +305,8 @@ class MainActivity : AppCompatActivity() {
             }
 
             when (action) {
-                "PLAY", "PAUSE", "STOP", "REQUEST_STATUS", "HEARTBEAT" -> {
+                "PLAY", "PAUSE", "STOP", "REQUEST_STATUS", "HEARTBEAT",
+                "PLAY_TIMELINE", "PAUSE_TIMELINE" -> {
                     playbackHandler.handleCommand(jsonCommand)
                 }
                 "SYNC_PLAYLIST" -> {
