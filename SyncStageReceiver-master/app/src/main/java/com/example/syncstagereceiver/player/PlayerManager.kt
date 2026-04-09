@@ -285,10 +285,13 @@ class PlayerManager(
             transitionExpectedAt = 0
             handler.post {
                 try {
-                    val nextIndex = (exoPlayer.currentMediaItemIndex + 1) % exoPlayer.mediaItemCount
-                    exoPlayer.seekTo(nextIndex, 0)
-                    exoPlayer.playWhenReady = true
-                    Timber.i("Transition watchdog: Forced advance to clip index $nextIndex")
+                    val mediaItemCount = exoPlayer.mediaItemCount
+                    if (mediaItemCount > 0) {
+                        val nextIndex = (exoPlayer.currentMediaItemIndex + 1) % mediaItemCount
+                        exoPlayer.seekTo(nextIndex, 0)
+                        exoPlayer.playWhenReady = true
+                        Timber.i("Transition watchdog: Forced advance to clip index $nextIndex")
+                    }
                 } catch (e: Exception) {
                     Timber.e(e, "Transition watchdog: Failed to force next clip")
                 }
