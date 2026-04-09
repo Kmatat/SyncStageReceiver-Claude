@@ -2,6 +2,7 @@ package com.example.syncstagereceiver.network
 
 import android.content.Context
 import io.ktor.http.*
+import io.ktor.http.content.*
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
@@ -9,7 +10,6 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import timber.log.Timber
 import java.io.File
-import java.io.FileInputStream
 
 class StreamingServer(private val context: Context) {
 
@@ -37,15 +37,12 @@ class StreamingServer(private val context: Context) {
                         }
 
                         if (videoFile.exists() && videoFile.isFile) {
-                            Timber.d("P2P: Serving file $videoName to peer.")
+                            Timber.d("P2P: Serving file $videoName (${videoFile.length()} bytes) to peer.")
 
-                            // Simple file serving using OutputStream
-                            // Ktor's LocalFileContent handles Range headers for resume support automatically
-                            call.respondOutputStream(ContentType.Video.MP4, HttpStatusCode.OK) {
-                                FileInputStream(videoFile).use { input ->
-                                    input.copyTo(this)
-                                }
-                            }
+                            // Use LocalFileContent which properly handles:
+                            // - Content-Length header (so receiver knows total size)
+                            // - Range requests (HTTP 206 Partial Content for download resume)
+                            call.respond(LocalFileContent(videoFile, ContentType.Video.MP4))
                         } else {
                             call.respond(HttpStatusCode.NotFound)
                         }

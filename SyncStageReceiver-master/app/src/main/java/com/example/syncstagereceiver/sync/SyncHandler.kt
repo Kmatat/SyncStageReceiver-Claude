@@ -31,7 +31,7 @@ class SyncHandler(
 ) {
     var feedbackSender: FeedbackSender? = null
     var onSyncCompleted: (() -> Unit)? = null
-    
+
     // Retry configuration
     private val MAX_RETRIES = 3
     private val RETRY_DELAY_MS = 2000L
@@ -42,10 +42,22 @@ class SyncHandler(
         }
     )
 
+    // Track active sync job so we can cancel it when a new SYNC_PLAYLIST arrives
+    @Volatile
+    private var activeSyncJob: Job? = null
+
     data class FileManifest(val id: String, val name: String, val url: String, val hash: String)
 
     fun handleSyncPlaylist(jsonPayload: String) {
-        syncScope.launch {
+        // Cancel any in-progress sync to prevent concurrent writes to same .tmp files
+        activeSyncJob?.let { job ->
+            if (job.isActive) {
+                Timber.w("Cancelling previous sync — new SYNC_PLAYLIST arrived")
+                job.cancel()
+            }
+        }
+
+        activeSyncJob = syncScope.launch {
             var playlistId: String? = null
             var filesToSync: List<FileManifest> = emptyList()
 
