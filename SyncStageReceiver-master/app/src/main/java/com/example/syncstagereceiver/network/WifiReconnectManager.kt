@@ -102,6 +102,8 @@ class WifiReconnectManager(private val context: Context) {
         Timber.i("WiFi Monitor: Stopped")
     }
 
+    private var targetNetworkId: Int = -1
+
     /**
      * Ensure WiFi is enabled, the target network is saved, and we are connected to it.
      */
@@ -123,7 +125,7 @@ class WifiReconnectManager(private val context: Context) {
 
             // Check if already connected to the target SSID
             if (isConnectedToTargetSsid()) {
-                Timber.i("WiFi Monitor: Already connected to $TARGET_SSID")
+                Timber.d("WiFi Monitor: Already connected to $TARGET_SSID")
                 return
             }
 
@@ -152,9 +154,20 @@ class WifiReconnectManager(private val context: Context) {
         try {
             val quotedSsid = "\"$TARGET_SSID\""
 
+            // If we already know the network ID from a previous add, just enable it
+            if (targetNetworkId != -1) {
+                val enabled = wifiManager.enableNetwork(targetNetworkId, true)
+                wifiManager.reconnect()
+                Timber.i("WiFi Monitor: Re-enabling saved network $TARGET_SSID (id=$targetNetworkId, enabled=$enabled)")
+                return enabled
+            }
+
             // Check if network is already saved
-            val existingConfig = wifiManager.configuredNetworks?.find {
-                it.SSID == quotedSsid
+            val existingConfig = try {
+                wifiManager.configuredNetworks?.find { it.SSID == quotedSsid }
+            } catch (e: SecurityException) {
+                Timber.w("WiFi Monitor: Cannot read configured networks: ${e.message}")
+                null
             }
 
             val networkId: Int
@@ -176,11 +189,14 @@ class WifiReconnectManager(private val context: Context) {
                 Timber.i("WiFi Monitor: Added network $TARGET_SSID (id=$networkId)")
             }
 
-            // Disconnect from current network and connect to target
-            wifiManager.disconnect()
+            // Cache the network ID for future reconnects (avoids SecurityException on getConfiguredNetworks)
+            targetNetworkId = networkId
+
+            // Enable the target network and let the system connect
+            // Using disableOthers=true makes the system prefer this network
             val enabled = wifiManager.enableNetwork(networkId, true)
-            val reconnected = wifiManager.reconnect()
-            Timber.i("WiFi Monitor: Connecting to $TARGET_SSID (enabled=$enabled, reconnect=$reconnected)")
+            wifiManager.reconnect()
+            Timber.i("WiFi Monitor: Connecting to $TARGET_SSID (id=$networkId, enabled=$enabled)")
             return enabled
         } catch (e: SecurityException) {
             Timber.w("WiFi Monitor: Legacy connect failed (SecurityException): ${e.message}")
