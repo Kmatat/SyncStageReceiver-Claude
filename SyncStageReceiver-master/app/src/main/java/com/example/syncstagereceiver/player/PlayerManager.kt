@@ -454,6 +454,10 @@ class PlayerManager(
                         }
                     }
 
+                    val skipped = filenames.size - mediaItems.size
+                    if (skipped > 0) {
+                        Timber.w("Playlist: $skipped/${filenames.size} files missing or invalid")
+                    }
                     Timber.i("Playlist loading: ${mediaItems.size}/${filenames.size} files valid")
                     if (mediaItems.isNotEmpty()) {
                         exoPlayer.setMediaItems(mediaItems)

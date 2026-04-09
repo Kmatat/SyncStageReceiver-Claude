@@ -103,8 +103,15 @@ class SyncHandler(
                 Timber.i("All downloads verified. Committing changes...")
 
                 // Move temp files to final location
+                val failedFinalizations = mutableListOf<String>()
                 filesToSync.forEach { manifest ->
-                    fileHandler.finalizeDownload(manifest.name)
+                    if (!fileHandler.finalizeDownload(manifest.name)) {
+                        Timber.e("Failed to finalize ${manifest.name}")
+                        failedFinalizations.add(manifest.name)
+                    }
+                }
+                if (failedFinalizations.isNotEmpty()) {
+                    throw Exception("Failed to finalize: $failedFinalizations")
                 }
 
                 // Cleanup old files
@@ -233,6 +240,10 @@ class SyncHandler(
 
         } catch (e: Exception) {
             Timber.w("Download interrupted for ${file.name}: ${e.message}")
+            // Delete corrupt temp file so next retry starts fresh
+            if (tempFile.exists()) {
+                tempFile.delete()
+            }
             throw e
         } finally {
             connection.disconnect()
