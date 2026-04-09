@@ -566,23 +566,42 @@ class PlayerManager(
     private val timelineSyncRunnable = object : Runnable {
         override fun run() {
             try {
-                if (activeTimelineStart <= 0L) return
+                if (activeTimelineStart <= 0L || activeTimelineTotalDuration <= 0L) return
 
                 val now = timeManager.getSynchronizedTime()
                 val elapsed = now - activeTimelineStart
+                if (elapsed < 0) {
+                    // Clock skew — timeline hasn't started yet from our perspective
+                    handler.postDelayed(this, 2000L)
+                    return
+                }
                 val loopPosition = elapsed % activeTimelineTotalDuration
 
                 val (expectedIndex, expectedOffset) = calculateTimelinePosition(loopPosition, activeTimelineDurations)
 
+                // Map expected timeline index to ExoPlayer index (files may be missing)
+                val actualItemCount = exoPlayer.mediaItemCount
+                val targetFilename = activeTimelineFilenames.getOrNull(expectedIndex)
+                val mappedIndex = if (targetFilename != null && actualItemCount > 0) {
+                    (0 until actualItemCount).firstOrNull { i ->
+                        exoPlayer.getMediaItemAt(i).mediaId == targetFilename
+                    } ?: -1
+                } else -1
+                val safeIndex = when {
+                    mappedIndex >= 0 -> mappedIndex
+                    expectedIndex < actualItemCount -> expectedIndex
+                    else -> 0
+                }
+
                 val actualIndex = exoPlayer.currentMediaItemIndex
                 val actualPosition = exoPlayer.currentPosition
-                val isWrongVideo = actualIndex != expectedIndex
+                val isWrongVideo = actualIndex != safeIndex
                 val drift = expectedOffset - actualPosition
                 val absDrift = abs(drift)
 
                 if (isWrongVideo || absDrift > 200L) {
-                    Timber.w("Timeline sync: HARD SEEK - expected idx=$expectedIndex@${expectedOffset}ms, actual idx=$actualIndex@${actualPosition}ms (drift=${drift}ms)")
-                    exoPlayer.seekTo(expectedIndex, expectedOffset)
+                    Timber.w("Timeline sync: HARD SEEK - expected idx=$safeIndex@${expectedOffset}ms, actual idx=$actualIndex@${actualPosition}ms (drift=${drift}ms)")
+                    exoPlayer.seekTo(safeIndex, expectedOffset)
                     exoPlayer.playbackParameters = PlaybackParameters(1.0f)
                 } else if (absDrift > 50L) {
                     if (drift > 0) {
@@ -685,12 +704,21 @@ class PlayerManager(
 
                 // Calculate initial position and seek
                 val now = timeManager.getSynchronizedTime()
-                val elapsed = now - timelineStart
-                val loopPosition = elapsed % totalDuration
+                val elapsed = (now - timelineStart).coerceAtLeast(0L)
+                val loopPosition = if (totalDuration > 0) elapsed % totalDuration else 0L
                 val (startIndex, startOffset) = calculateTimelinePosition(loopPosition, durations)
 
-                Timber.i("Timeline: Starting at index=$startIndex, offset=${startOffset}ms (elapsed=${elapsed}ms, loop=${loopPosition}ms)")
-                exoPlayer.seekTo(startIndex, startOffset)
+                // Map timeline index to ExoPlayer index (some files may be missing)
+                val actualItemCount = exoPlayer.mediaItemCount
+                val targetFilename = filenames.getOrNull(startIndex)
+                val mappedStartIndex = if (targetFilename != null && actualItemCount > 0) {
+                    (0 until actualItemCount).firstOrNull { i ->
+                        exoPlayer.getMediaItemAt(i).mediaId == targetFilename
+                    } ?: 0
+                } else if (startIndex < actualItemCount) startIndex else 0
+
+                Timber.i("Timeline: Starting at index=$mappedStartIndex, offset=${startOffset}ms (elapsed=${elapsed}ms, loop=${loopPosition}ms)")
+                exoPlayer.seekTo(mappedStartIndex, startOffset)
                 exoPlayer.playbackParameters = PlaybackParameters(1.0f)
                 exoPlayer.playWhenReady = true
                 exoPlayer.play()
