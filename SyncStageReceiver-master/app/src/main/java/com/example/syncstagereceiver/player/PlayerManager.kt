@@ -570,6 +570,10 @@ class PlayerManager(
         override fun run() {
             try {
                 if (activeTimelineStart <= 0L || activeTimelineTotalDuration <= 0L) return
+                if (exoPlayer.mediaItemCount == 0 || !exoPlayer.isPlaying) {
+                    handler.postDelayed(this, 2000L)
+                    return
+                }
 
                 val now = timeManager.getSynchronizedTime()
                 val elapsed = now - activeTimelineStart
@@ -656,7 +660,12 @@ class PlayerManager(
     ) {
         handler.post {
             try {
-                // Store timeline parameters
+                if (filenames.isEmpty()) {
+                    stop()
+                    return@post
+                }
+
+                // Store timeline parameters AFTER validation
                 activeTimelineFilenames = filenames
                 activeTimelineDurations = durations
                 activeTimelineStart = timelineStart
@@ -665,11 +674,6 @@ class PlayerManager(
                 // Hide black overlay, show player
                 hideBlackOverlay()
                 showIdleImage(false)
-
-                if (filenames.isEmpty()) {
-                    stop()
-                    return@post
-                }
 
                 // Load playlist if changed (same signature-based detection as playPlaylist)
                 val newSignature = filenames.joinToString(",") { filename ->
@@ -783,13 +787,9 @@ class PlayerManager(
         try {
             exoPlayer.stop()
             exoPlayer.clearMediaItems()
-            
-            // Request garbage collection
+
             System.gc()
-            
-            // Small delay to allow cleanup
-            Thread.sleep(50)
-            
+
             Timber.d("Memory cleanup completed before playlist change")
         } catch (e: Exception) {
             Timber.w(e, "Error during memory cleanup")
@@ -917,9 +917,13 @@ class PlayerManager(
      */
     fun pause() {
         handler.post {
+            // Clear timeline state so legacy PLAY can resume afterward
+            handler.removeCallbacks(timelineSyncRunnable)
+            activeTimelineStart = 0L
+
             exoPlayer.pause()
-            showBlackOverlay()  // NEW: Show black screen instead of frozen frame
-            
+            showBlackOverlay()  // Show black screen instead of frozen frame
+
             // Report pause status
             val filename = exoPlayer.currentMediaItem?.mediaId ?: ""
             sendPlaybackReport(filename, "PAUSED")

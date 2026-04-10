@@ -125,10 +125,10 @@ class PlaybackHandler(
         val playlist = playlistArray?.map { it.asString } ?: emptyList()
 
         val durationsArray = command.getAsJsonArray("durations")
-        val durations = durationsArray?.map { it.asLong } ?: emptyList()
+        val durations = durationsArray?.map { it.asNumber?.toLong() ?: 0L } ?: emptyList()
 
-        val timelineStart = command.get("timelineStart")?.asLong ?: 0L
-        val totalDuration = command.get("totalDuration")?.asLong ?: 0L
+        val timelineStart = command.get("timelineStart")?.asNumber?.toLong() ?: 0L
+        val totalDuration = command.get("totalDuration")?.asNumber?.toLong() ?: 0L
 
         if (playlist.isNotEmpty() && durations.isNotEmpty() && timelineStart > 0L && totalDuration > 0L) {
             Timber.i("PLAY_TIMELINE command: ${playlist.size} files, timelineStart=$timelineStart, totalDuration=$totalDuration")
