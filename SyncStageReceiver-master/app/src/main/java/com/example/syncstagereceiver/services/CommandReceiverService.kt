@@ -270,14 +270,22 @@ class CommandReceiverService : Service() {
                             lastMessageReceivedAt = System.currentTimeMillis()
 
                             // Intercept HEARTBEAT at transport level and respond immediately
-                            // without broadcasting to the activity layer
+                            // without broadcasting to the activity layer.
+                            // Take socketLock so the write cannot interleave with a
+                            // sendFeedback() coroutine writing to the same output stream.
                             if (command.contains("\"HEARTBEAT\"") && !command.contains("\"HEARTBEAT_ACK\"")) {
-                                try {
-                                    clientOutput?.println("{\"action\":\"HEARTBEAT_ACK\"}")
-                                    clientOutput?.flush()
-                                    Timber.v("HEARTBEAT_ACK sent")
-                                } catch (e: Exception) {
-                                    Timber.e(e, "Failed to send HEARTBEAT_ACK")
+                                synchronized(socketLock) {
+                                    try {
+                                        val output = clientOutput
+                                        val socket = clientSocket
+                                        if (output != null && socket != null && !socket.isClosed) {
+                                            output.println("{\"action\":\"HEARTBEAT_ACK\"}")
+                                            output.flush()
+                                            Timber.v("HEARTBEAT_ACK sent")
+                                        }
+                                    } catch (e: Exception) {
+                                        Timber.e(e, "Failed to send HEARTBEAT_ACK")
+                                    }
                                 }
                                 continue
                             }
