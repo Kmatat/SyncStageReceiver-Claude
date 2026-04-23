@@ -83,9 +83,14 @@ class MulticastReceiver(
 
     fun stop() {
         listenJob?.cancel()
+        listenJob = null
         try { multicastGroup?.let { socket?.leaveGroup(it) } } catch (_: Exception) {}
         socket?.close()
+        socket = null
         releaseMulticastLock()
+        // Cancel the owner scope so a rebuilt service cannot resurrect the
+        // previous listener; nothing else holds a reference to it.
+        scope.cancel()
     }
 
     private fun acquireMulticastLock() {
