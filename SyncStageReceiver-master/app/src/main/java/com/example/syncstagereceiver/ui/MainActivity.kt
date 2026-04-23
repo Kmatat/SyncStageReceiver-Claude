@@ -406,7 +406,7 @@ class MainActivity : AppCompatActivity() {
             isBound = false
         }
         try { playerManager.releasePlayer() } catch (_: Exception) {}
-        try { if (::networkServiceAdvertiser.isInitialized) networkServiceAdvertiser.unregisterService() } catch (_: Exception) {}
+        try { if (::networkServiceAdvertiser.isInitialized) networkServiceAdvertiser.release() } catch (_: Exception) {}
         try { if (::streamingServer.isInitialized) streamingServer.stop() } catch (_: Exception) {}
         try { if (::wifiReconnectManager.isInitialized) wifiReconnectManager.stop() } catch (_: Exception) {}
         try { if (::localPlaybackLogger.isInitialized) localPlaybackLogger.shutdown() } catch (_: Exception) {}

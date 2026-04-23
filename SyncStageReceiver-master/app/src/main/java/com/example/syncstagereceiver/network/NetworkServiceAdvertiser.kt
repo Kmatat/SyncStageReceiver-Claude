@@ -2,6 +2,10 @@ package com.example.syncstagereceiver.network
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Handler
@@ -19,9 +23,35 @@ class NetworkServiceAdvertiser(
         Timber.e(e, "Failed to get NsdManager")
         null
     }
+    private val connectivityManager: ConnectivityManager? =
+        context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
     private val handler = Handler(Looper.getMainLooper())
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var serviceName: String? = null
+
+    // Auto-retry registration when the network comes back. Covers the first-boot
+    // race where the device has no IP yet when registerService() is first called.
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            if (registrationListener == null) {
+                Timber.i("Network available — (re)registering NSD service")
+                handler.post { registerService() }
+            }
+        }
+    }
+    private var networkCallbackRegistered = false
+
+    init {
+        try {
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            connectivityManager?.registerNetworkCallback(request, networkCallback)
+            networkCallbackRegistered = true
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to register ConnectivityManager callback")
+        }
+    }
 
     fun registerService() {
         if (registrationListener != null || nsdManager == null) return
@@ -52,7 +82,7 @@ class NetworkServiceAdvertiser(
             }
 
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-                Timber.e("NSD Registration failed: Error $errorCode")
+                Timber.e("NSD Registration failed: Error $errorCode — will retry on next network-available")
                 registrationListener = null
             }
 
@@ -69,7 +99,7 @@ class NetworkServiceAdvertiser(
         try {
             nsdManager.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, registrationListener)
         } catch (e: Exception) {
-            Timber.e(e, "Failed to register NSD service")
+            Timber.e(e, "Failed to register NSD service — will retry on next network-available")
             registrationListener = null
         }
     }
@@ -92,5 +122,21 @@ class NetworkServiceAdvertiser(
         unregisterService()
         // Use handler delay instead of Thread.sleep to avoid blocking main thread
         handler.postDelayed({ registerService() }, 150)
+    }
+
+    /**
+     * Full teardown — unregisters the NSD service and the network callback.
+     * After this the advertiser will not auto-retry on network-available.
+     */
+    fun release() {
+        unregisterService()
+        if (networkCallbackRegistered) {
+            try {
+                connectivityManager?.unregisterNetworkCallback(networkCallback)
+            } catch (e: Exception) {
+                Timber.w(e, "Error unregistering ConnectivityManager callback")
+            }
+            networkCallbackRegistered = false
+        }
     }
 }
