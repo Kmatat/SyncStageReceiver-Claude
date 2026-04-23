@@ -32,6 +32,9 @@ class SyncHandler(
     // Retry configuration
     private val MAX_RETRIES = 3
     private val RETRY_DELAY_MS = 2000L
+    // Hard upper bound on a single file download; prevents one hung connection
+    // from stalling the whole playlist sync indefinitely.
+    private val PER_DOWNLOAD_TIMEOUT_MS = 180_000L
 
     private val syncScope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, e ->
@@ -171,8 +174,17 @@ class SyncHandler(
 
         repeat(MAX_RETRIES) { attempt ->
             try {
-                secureDownload(file)
+                withTimeout(PER_DOWNLOAD_TIMEOUT_MS) {
+                    runInterruptible(Dispatchers.IO) { secureDownload(file) }
+                }
                 return // Success
+            } catch (e: TimeoutCancellationException) {
+                lastException = Exception("Download timed out after ${PER_DOWNLOAD_TIMEOUT_MS}ms", e)
+                Timber.w("Download attempt ${attempt + 1} timed out for ${file.name}")
+
+                if (attempt < MAX_RETRIES - 1) {
+                    delay(RETRY_DELAY_MS * (attempt + 1)) // Exponential backoff
+                }
             } catch (e: Exception) {
                 lastException = e
                 Timber.w("Download attempt ${attempt + 1} failed for ${file.name}: ${e.message}")
