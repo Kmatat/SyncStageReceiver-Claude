@@ -1012,17 +1012,26 @@ class PlayerManager(
     }
 
     fun tryResumeFromSavedState() {
+        val json = sharedPreferences.getString("last_playlist_json", null)
+        val savedAt = sharedPreferences.getLong("last_saved_at", 0)
+        val ageMs = System.currentTimeMillis() - savedAt
+
+        if (json == null || ageMs > 24 * 60 * 60 * 1000L) {
+            Timber.d("No recent saved state (age=${ageMs / 1000}s). Waiting for Controller command.")
+            return
+        }
+
+        val filenames: List<String> = try {
+            Gson().fromJson(json, object : TypeToken<List<String>>() {}.type) ?: emptyList()
+        } catch (e: Exception) {
+            // Truncated/corrupt state file (e.g. power loss during write).
+            // Drop it so the next resume attempt doesn't hit the same payload.
+            Timber.e(e, "Saved playlist state is unparseable; dropping it")
+            clearSavedPlaybackState()
+            return
+        }
+
         try {
-            val json = sharedPreferences.getString("last_playlist_json", null)
-            val savedAt = sharedPreferences.getLong("last_saved_at", 0)
-            val ageMs = System.currentTimeMillis() - savedAt
-
-            if (json == null || ageMs > 24 * 60 * 60 * 1000L) {
-                Timber.d("No recent saved state (age=${ageMs / 1000}s). Waiting for Controller command.")
-                return
-            }
-
-            val filenames: List<String> = Gson().fromJson(json, object : TypeToken<List<String>>() {}.type)
             val index = sharedPreferences.getInt("last_index", 0)
             val position = sharedPreferences.getLong("last_position", 0)
 
