@@ -285,10 +285,17 @@ class PlayerManager(
             try {
                 if (exoPlayer.isPlaying) {
                     val currentPos = exoPlayer.currentPosition
+                    val actualDelta = currentPos - lastWatchdogPosition
+                    // Expected progress in the last interval, scaled by the
+                    // current playback speed (soft-sync may slow to 0.95x).
+                    // Low-fps decoders legitimately advance in small steps, so
+                    // flag stuck only when progress drops below 10% of expected.
+                    val expectedDelta = (WATCHDOG_INTERVAL_MS * exoPlayer.playbackParameters.speed).toLong()
+                    val stuckThreshold = (expectedDelta / 10).coerceAtLeast(1)
 
-                    if (currentPos == lastWatchdogPosition) {
+                    if (actualDelta < stuckThreshold) {
                         watchdogStuckCount++
-                        Timber.w("Watchdog: Position stuck at $currentPos (count: $watchdogStuckCount/$WATCHDOG_MAX_STUCK_COUNT)")
+                        Timber.w("Watchdog: Position barely advanced (${actualDelta}ms/${expectedDelta}ms expected) count: $watchdogStuckCount/$WATCHDOG_MAX_STUCK_COUNT")
 
                         if (watchdogStuckCount >= WATCHDOG_MAX_STUCK_COUNT) {
                             Timber.e("Watchdog: Player stuck for ${watchdogStuckCount * WATCHDOG_INTERVAL_MS}ms! Forcing recovery...")
