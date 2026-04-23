@@ -780,19 +780,19 @@ class PlayerManager(
     }
 
     /**
-     * NEW: Clean up memory before loading a new playlist.
-     * Prevents OOM crashes on devices with limited RAM.
+     * Clear ExoPlayer state before loading a new playlist. Runs on the UI
+     * thread (playPlaylist / reloadPlaylistIfFilesAvailable dispatch from
+     * here), so we must not block it — in particular no System.gc(), which
+     * stutters playback on low-end TV boxes without meaningfully helping:
+     * the GC will run on its own when ExoPlayer's buffers are released.
      */
     private fun cleanupBeforePlaylistChange() {
         try {
             exoPlayer.stop()
             exoPlayer.clearMediaItems()
-
-            System.gc()
-
-            Timber.d("Memory cleanup completed before playlist change")
+            Timber.d("Player state cleared before playlist change")
         } catch (e: Exception) {
-            Timber.w(e, "Error during memory cleanup")
+            Timber.w(e, "Error during playlist-change cleanup")
         }
     }
 
